@@ -115,6 +115,7 @@ def build_run_config(ui: Dict[str, Any]) -> Dict[str, Any]:
 
     # advanced (optional)
     put("prev_focusmap_by_region", "prev_focusmap_by_region")
+    put("prev_focusmap_dir", "prev_focusmap_dir")  # folder of prev_focusmap .txt
     put("plane_update_method", "plane_update_method")
     put("initial_ol_mode", "initial_ol_mode")
     # any extra focus_map keys passed verbatim

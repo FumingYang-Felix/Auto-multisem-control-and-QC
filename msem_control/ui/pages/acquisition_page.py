@@ -2306,13 +2306,27 @@ class AcquisitionPage(BasePage):
         path_layout.addWidget(self.edit_output_path)
         path_layout.addWidget(self.btn_browse)
         
+        # Prev focus-map folder: a directory of per-section prev_focusmap .txt
+        # files. The pipeline matches each section to its file by number
+        # (S25R1 -> w*_s25.txt). Leave blank to use the dict baked into
+        # focus_map.CONFIG['prev_focusmap_by_region'].
+        pfm_layout = QHBoxLayout()
+        self.edit_prev_focusmap_dir = QLineEdit("")
+        self.edit_prev_focusmap_dir.setPlaceholderText("(optional) folder of prev_focusmap *.txt")
+        self.btn_browse_pfm = QPushButton("...")
+        self.btn_browse_pfm.setFixedWidth(30)
+        self.btn_browse_pfm.clicked.connect(self._browse_prev_focusmap_dir)
+        pfm_layout.addWidget(self.edit_prev_focusmap_dir)
+        pfm_layout.addWidget(self.btn_browse_pfm)
+
         # Image settings
         self.edit_prefix = QLineEdit("tile_")
-        
+
         self.combo_format = QComboBox()
         self.combo_format.addItems(["bmp", "tif", "png", "jpg"])
-        
+
         output_form.addRow("Output Path:", path_layout)
+        output_form.addRow("Prev Focus-map Dir:", pfm_layout)
         output_form.addRow("File Prefix:", self.edit_prefix)
         output_form.addRow("Image Format:", self.combo_format)
         
@@ -3597,7 +3611,13 @@ class AcquisitionPage(BasePage):
         folder = QFileDialog.getExistingDirectory(self, "Select Output Directory")
         if folder:
             self.edit_output_path.setText(folder)
-    
+
+    def _browse_prev_focusmap_dir(self):
+        """Browse for the folder of per-section prev_focusmap *.txt files."""
+        folder = QFileDialog.getExistingDirectory(self, "Select Prev Focus-map Directory")
+        if folder:
+            self.edit_prev_focusmap_dir.setText(folder)
+
     def _on_thumbnail_toggle(self, state):
         """Enable/disable thumbnail settings based on checkbox"""
         enabled = state == Qt.Checked
@@ -3735,6 +3755,11 @@ class AcquisitionPage(BasePage):
             "travel_direction": self.combo_direction.currentText(),
             "start_position": self.combo_start.currentText(),
         }
+        # Optional: a folder of prev_focusmap *.txt (matched per-section by the
+        # pipeline). Only pass it when the user filled it in.
+        pfm_dir = self.edit_prev_focusmap_dir.text().strip()
+        if pfm_dir:
+            ui["prev_focusmap_dir"] = pfm_dir
         config = build_run_config(ui)
 
         # Create + wire the runner once.

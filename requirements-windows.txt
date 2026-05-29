@@ -1,0 +1,8 @@
+# Windows-only deps (installed automatically by setup_env.py on Windows).
+-r requirements.txt
+
+# Zeiss MultiSEM COM interface (the ZeissmSEMWrapper.Commands object).
+# Per the Zeiss API doc, comtypes 1.1.7 is the reference version, but newer
+# works fine. The COM object itself must also be registered with regasm
+# (see setup_env.py output / INTEGRATION_NOTES.md).
+comtypes>=1.2.0

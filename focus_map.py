@@ -68,6 +68,13 @@ CONFIG: Dict[str, Any] = {
         "S27R1": "w13_s27.txt",
     },
 
+    # Alternative to the explicit dict above: point at a FOLDER of prev_focusmap
+    # .txt files and let the software match each section by number (S25R1 -> a
+    # file whose name contains 's25' as a token, e.g. w13_s25.txt). When set,
+    # it's used for any region not found in prev_focusmap_by_region. Set the
+    # dict to {} (or leave it) and just set this to use folder mode exclusively.
+    "prev_focusmap_dir": None,
+
 
     # region ordering when process_all_regions=True
     "region_order_method": "SHORTEST_PATH",   # JSON / SHORTEST_PATH
@@ -2984,6 +2991,77 @@ class _TeeStream:
         return getattr(self._primary, name)
 
 
+def resolve_prev_focusmap_path(region_name: str) -> str:
+    """Find the prev_focusmap .txt for a region, in priority order:
+
+      1. CONFIG['prev_focusmap_by_region']  — explicit per-region dict (if the
+         region key is present, or a same-section S<N>* key as fallback)
+      2. CONFIG['prev_focusmap_dir']        — a FOLDER of .txt files; the file
+         is matched to the region by section number (S25R1 -> a file whose name
+         contains 's25' as a token, e.g. w15_s25.txt). This is the "just point
+         at a folder, software figures it out" mode.
+      3. CONFIG['prev_focusmap_path']       — legacy single-file fallback
+
+    Returns an absolute path (relative paths resolve against project_root).
+    """
+    def _abs(p: str) -> str:
+        return p if os.path.isabs(p) else os.path.join(project_root, p)
+
+    prev_map_dict = CONFIG.get("prev_focusmap_by_region", None)
+    prev_dir = CONFIG.get("prev_focusmap_dir", None)
+
+    # 1. explicit per-region dict
+    if prev_map_dict:
+        if region_name in prev_map_dict:
+            return _abs(prev_map_dict[region_name])
+        m = re.match(r"(S\d+)", region_name)
+        if m:
+            section_prefix = m.group(1)
+            same_section = sorted(k for k in prev_map_dict if k.startswith(section_prefix))
+            if same_section:
+                print(f"[PrevFocusMap] '{region_name}' not in dict, using same-section "
+                      f"key '{same_section[0]}'")
+                return _abs(prev_map_dict[same_section[0]])
+
+    # 2. folder auto-discovery by section number
+    if prev_dir:
+        prev_dir_abs = _abs(prev_dir)
+        if not os.path.isdir(prev_dir_abs):
+            raise FileNotFoundError(f"prev_focusmap_dir not found: {prev_dir_abs}")
+        m = re.match(r"[Ss](\d+)", region_name)
+        if not m:
+            raise RuntimeError(
+                f"Cannot extract a section number from region '{region_name}' "
+                f"to match a prev_focusmap file in {prev_dir_abs}")
+        sec = int(m.group(1))
+        # match 's<sec>' as a token: 's25' matches w15_s25.txt but NOT s250.
+        pat = re.compile(rf'(?:^|[_\-]) ?[sS]0*{sec}(?=$|[_\-.])', re.X)
+        matches = sorted(
+            f for f in os.listdir(prev_dir_abs)
+            if f.lower().endswith(".txt") and pat.search(os.path.splitext(f)[0])
+        )
+        if not matches:
+            sample = sorted(x for x in os.listdir(prev_dir_abs) if x.lower().endswith(".txt"))[:20]
+            raise FileNotFoundError(
+                f"No prev_focusmap .txt for section S{sec} (region '{region_name}') "
+                f"in {prev_dir_abs}.\n  .txt files there: {sample}")
+        if len(matches) > 1:
+            print(f"[PrevFocusMap] multiple .txt match section S{sec}: {matches} "
+                  f"— using '{matches[0]}'")
+        chosen = os.path.join(prev_dir_abs, matches[0])
+        print(f"[PrevFocusMap] region '{region_name}' -> section S{sec} -> {matches[0]}")
+        return chosen
+
+    # 3. legacy single-file
+    legacy = CONFIG.get("prev_focusmap_path")
+    if legacy:
+        return _abs(legacy)
+
+    raise RuntimeError(
+        f"No prev focusmap source for region '{region_name}': set one of "
+        f"prev_focusmap_by_region, prev_focusmap_dir, or prev_focusmap_path in CONFIG.")
+
+
 def run_one_region(
     conn: MSEMConnection,
     json_file: str,
@@ -3060,37 +3138,7 @@ def _run_one_region_body(
 
 
 
-    prev_map_dict = CONFIG.get("prev_focusmap_by_region", None)
-
-    if prev_map_dict is not None:
-        if region_name in prev_map_dict:
-            prev_path = prev_map_dict[region_name]
-        else:
-            import re
-            m_cur = re.match(r"(S\d+)", region_name)
-            fallback_key = None
-            if m_cur:
-                section_prefix = m_cur.group(1)
-                same_section = [k for k in prev_map_dict if k.startswith(section_prefix)]
-                if same_section:
-                    fallback_key = sorted(same_section)[0]
-
-            if fallback_key is None:
-                raise RuntimeError(
-                    f"No prev focusmap configured for region '{region_name}'. "
-                    f"Available keys: {sorted(prev_map_dict.keys())}"
-                )
-
-            print(
-                f"[PrevFocusMap] region '{region_name}' not in prev_focusmap_by_region, "
-                f"using fallback '{fallback_key}'"
-            )
-            prev_path = prev_map_dict[fallback_key]
-    else:
-        prev_path = CONFIG["prev_focusmap_path"]   # fallback for old single-region mode
-
-    if not os.path.isabs(prev_path):
-        prev_path = os.path.join(project_root, prev_path)
+    prev_path = resolve_prev_focusmap_path(region_name)
 
     if not os.path.exists(prev_path):
         raise FileNotFoundError(f"prev focusmap not found for region '{region_name}': {prev_path}")

@@ -64,6 +64,29 @@ runner's `finished` signal.
 }
 ```
 
+## Prev focus-map: point at a folder
+Instead of the hardcoded `focus_map.CONFIG['prev_focusmap_by_region']` dict, you
+can point at a **folder** of per-section `*.txt` focus maps and let the pipeline
+match each section by number (S25R1 → a file whose name contains `s25` as a
+token, e.g. `w13_s25.txt`):
+- In the GUI: Acquisition page → **Prev Focus-map Dir** (folder picker).
+- Or in config: `focus_map.CONFIG['prev_focusmap_dir']` / the run-config JSON.
+Resolution order: explicit `prev_focusmap_by_region` dict → `prev_focusmap_dir`
+folder → legacy `prev_focusmap_path`. (`resolve_prev_focusmap_path()` in
+focus_map.py.)
+
+## One-click environment setup
+```
+python setup_env.py            # install deps into the current Python
+python setup_env.py --venv     # ...or into an isolated ./.venv
+python setup_env.py --dry-run  # show what it would install
+```
+Windows: double-click `setup_env.bat` (it also installs comtypes and prints the
+COM-registration checklist). macOS/Linux: `./setup_env.sh`. Deps:
+`requirements.txt` (PySide6, numpy, Pillow, matplotlib) + `requirements-windows.txt`
+(comtypes). On the control PC, run the installer with the SAME Python that
+already runs focus_map.py so the GUI shares its Zeiss-COM environment.
+
 ## Running
 
 ### Mac (development, simulation only)

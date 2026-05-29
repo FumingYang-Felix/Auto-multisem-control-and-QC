@@ -1,24 +1,17 @@
-# MultiSEM Control Software Dependencies
-# =======================================
+# MultiSEM GUI + acquisition pipeline — core dependencies (cross-platform)
+# Install with the one-click setup:  python setup_env.py   (see setup_env.*)
 
-# GUI Framework
-PySide6>=6.5.0
+# GUI framework
+PySide6>=6.5,<6.11
 
-# Data Processing
-numpy>=1.24.0
-pandas>=2.0.0
+# QC + acquisition pipeline (qc_algorithm.py, live_qc_support.py)
+numpy>=1.24
+Pillow>=10.0
+matplotlib>=3.7
 
-# Image Processing
-Pillow>=10.0.0
+# --- Optional (uncomment if you load Zeiss .czi optical images in the map) ---
+# aicspylibczi>=3.0
+# czifile>=2019.7.2
 
-# CZI File Support (for Zeiss optical images)
-aicspylibczi>=3.0.0
-# Alternative: czifile>=2019.7.2
-
-# Windows COM Interface (only needed on Windows for real MSEM connection)
-# comtypes>=1.2.0  # Uncomment on Windows
-
-# Development Tools (optional)
-# pytest>=7.0.0
-# black>=23.0.0
-
+# Windows-only COM interface (comtypes) lives in requirements-windows.txt,
+# installed automatically by setup_env.py when running on Windows.
