@@ -1,0 +1,24 @@
+# MultiSEM Control Software Dependencies
+# =======================================
+
+# GUI Framework
+PySide6>=6.5.0
+
+# Data Processing
+numpy>=1.24.0
+pandas>=2.0.0
+
+# Image Processing
+Pillow>=10.0.0
+
+# CZI File Support (for Zeiss optical images)
+aicspylibczi>=3.0.0
+# Alternative: czifile>=2019.7.2
+
+# Windows COM Interface (only needed on Windows for real MSEM connection)
+# comtypes>=1.2.0  # Uncomment on Windows
+
+# Development Tools (optional)
+# pytest>=7.0.0
+# black>=23.0.0
+
