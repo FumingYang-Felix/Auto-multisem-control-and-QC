@@ -245,6 +245,7 @@ class MainWindow(QMainWindow):
             
             QGroupBox {
                 font-weight: bold;
+                color: #cccccc;
                 border: 1px solid #3e3e3e;
                 border-radius: 4px;
                 margin-top: 10px;
@@ -254,6 +255,7 @@ class MainWindow(QMainWindow):
                 subcontrol-origin: margin;
                 left: 10px;
                 padding: 0 5px;
+                color: #cccccc;
             }
             
             QPushButton {
@@ -305,10 +307,33 @@ class MainWindow(QMainWindow):
                 border: 1px solid #3e3e3e;
                 border-radius: 3px;
                 text-align: center;
+                color: #cccccc;
                 background-color: #2d2d2d;
             }
             QProgressBar::chunk {
                 background-color: #4ec9b0;
+            }
+
+            /* --- text colours the dark theme was missing (were black-on-dark) --- */
+            QCheckBox {
+                color: #cccccc;
+                spacing: 6px;
+            }
+            QCheckBox:disabled {
+                color: #666666;
+            }
+            QPlainTextEdit {
+                background-color: #3c3c3c;
+                color: #cccccc;
+                border: 1px solid #3e3e3e;
+                border-radius: 3px;
+            }
+            /* the combo-box POPUP list (separate from the closed box) */
+            QComboBox QAbstractItemView {
+                background-color: #2d2d2d;
+                color: #cccccc;
+                selection-background-color: #007acc;
+                selection-color: #ffffff;
             }
         """)
 
