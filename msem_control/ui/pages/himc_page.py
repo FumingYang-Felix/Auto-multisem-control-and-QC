@@ -125,16 +125,16 @@ class HiMcPage(BasePage):
     def _build_region_group(self) -> QGroupBox:
         box, form = self._group("Region selection")
         self.chk_process_all = QCheckBox("Process ALL regions in the JSON")
-        self.chk_process_all.toggled.connect(self._on_process_all_toggled)
         form.addRow(self.chk_process_all)
 
+        # Both fields stay editable regardless of the checkbox; focus_map uses
+        # region_name when 'process all' is OFF, region_name_filter when it's ON.
         self.edit_region_name = QLineEdit()
-        self.edit_region_name.setPlaceholderText("e.g. S25R1 (single-region mode)")
+        self.edit_region_name.setPlaceholderText("e.g. S25R1 (used when 'process all' is OFF)")
         form.addRow("Region name:", self.edit_region_name)
 
         self.edit_region_filter = QLineEdit()
-        self.edit_region_filter.setPlaceholderText("e.g. R1 — only when 'all regions' is on (empty = every region)")
-        self.edit_region_filter.setEnabled(False)
+        self.edit_region_filter.setPlaceholderText("e.g. R1 (used when 'process all' is ON; empty = every region)")
         form.addRow("Region filter:", self.edit_region_filter)
         return box
 
@@ -300,10 +300,6 @@ class HiMcPage(BasePage):
                 pass
 
     # -- small handlers -----------------------------------------------------
-    def _on_process_all_toggled(self, on: bool):
-        self.edit_region_filter.setEnabled(on)
-        self.edit_region_name.setEnabled(not on)
-
     def _browse_json(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Select imaging JSON", "", "JSON (*.json);;All files (*)")
@@ -374,16 +370,15 @@ class HiMcPage(BasePage):
             "qc_save_every": self.spin_save_every.value(),
         }
 
-        if self.chk_process_all.isChecked():
-            ui["process_all_regions"] = True
-            filt = self.edit_region_filter.text().strip()
-            if filt:
-                ui["region_name_filter"] = filt
-        else:
-            ui["process_all_regions"] = False
-            rn = self.edit_region_name.text().strip()
-            if rn:
-                ui["region_name"] = rn
+        # Always pass process_all_regions + whatever the user typed; focus_map
+        # picks region_name vs region_name_filter based on the flag.
+        ui["process_all_regions"] = self.chk_process_all.isChecked()
+        rn = self.edit_region_name.text().strip()
+        if rn:
+            ui["region_name"] = rn
+        filt = self.edit_region_filter.text().strip()
+        if filt:
+            ui["region_name_filter"] = filt
 
         pfm = self.edit_pfm.text().strip()
         if pfm:
