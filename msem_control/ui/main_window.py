@@ -157,9 +157,18 @@ class MainWindow(QMainWindow):
         self.params_panel.regions_loaded.connect(self.page_acq.load_regions_from_json)
         # Remember the imaging-JSON path on the acquisition page — focus_map.py
         # (run as a subprocess) reads its regions/contours straight from it.
-        self.params_panel.imaging_json_selected.connect(self.page_acq.set_imaging_json_path)
-        # ...and auto-fill the HI-MC page's imaging-JSON field from the same load.
-        self.params_panel.imaging_json_selected.connect(self.page_himc.set_imaging_json_path)
+        # Auto-fill both the Acquisition and HI-MC pages' imaging-JSON from the
+        # shared Load JSON. Guard against a STALE parameters_panel.py (a partial
+        # deploy missing this signal) so it degrades to a warning instead of
+        # crashing the whole window at startup.
+        if hasattr(self.params_panel, "imaging_json_selected"):
+            self.params_panel.imaging_json_selected.connect(self.page_acq.set_imaging_json_path)
+            self.params_panel.imaging_json_selected.connect(self.page_himc.set_imaging_json_path)
+        else:
+            print("[main_window] WARNING: ParametersPanel has no "
+                  "'imaging_json_selected' signal — your parameters_panel.py is "
+                  "STALE. Re-deploy the full msem_control/ folder so the shared "
+                  "Load JSON auto-fills the acquisition pages.")
     
     def create_images_dock(self):
         """Create right-side floating images and documents panel"""
