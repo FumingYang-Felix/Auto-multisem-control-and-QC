@@ -32,6 +32,50 @@ from .base_page import BasePage
 from ..widgets import LogPanel
 
 
+# Extra focus_map CONFIG knobs surfaced as proper widgets (beyond the main
+# scan/route/plane/QC groups). Data-driven so adding a param is one line; values
+# flow through fm_extra verbatim. Defaults MUST match focus_map.CONFIG.
+#   spec = (config_key, label, kind, default, opts)
+#   kind: "i" int spinbox, "f" float spinbox, "b" checkbox
+_EXTRA_PARAM_GROUPS = [
+    ("Stage / timing", [
+        ("stage_settling_time_ms", "Stage settling time", "i", 50, {"max": 600000, "suffix": " ms"}),
+        ("wait_stage_settled", "Wait for stage settled", "b", True, {}),
+        ("move_z_to_json_supportpoint", "Move Z to JSON support point", "b", False, {}),
+        ("defer_finish_write", "Defer finish-write (pipeline)", "b", True, {}),
+        ("force_finish_every_n", "Force finish every N tiles", "i", 5, {"max": 100000}),
+        ("sanity_every_n_tiles", "System-sanity every N tiles", "i", 0, {"max": 100000}),
+    ]),
+    ("Autofocus", [
+        ("af_enabled", "AF enabled", "b", True, {}),
+        ("minimize_ol_enabled", "Minimize-OL enabled", "b", True, {}),
+        ("dz_limit_um", "dz limit", "f", 11.0, {"max": 1000.0, "dec": 2, "suffix": " um"}),
+        ("minimize_ol_max_iters", "Minimize-OL max iters", "i", 6, {"max": 100}),
+        ("af_fine_support_points", "AF fine support points", "i", 7, {"max": 500}),
+        ("af_fine_range_uA", "AF fine range", "i", 500, {"max": 1000000, "suffix": " uA"}),
+        ("af_fine_scan_rate", "AF fine scan rate", "i", 4, {"max": 30}),
+        ("af_fine_pixel_size_nm", "AF fine pixel size", "f", 10.0, {"max": 1000.0, "dec": 1, "suffix": " nm"}),
+        ("af_coarse_support_points", "AF coarse support points", "i", 20, {"max": 500}),
+        ("af_coarse_range_uA", "AF coarse range", "i", 10000, {"max": 1000000, "suffix": " uA"}),
+        ("af_coarse_scan_rate", "AF coarse scan rate", "i", 4, {"max": 30}),
+        ("af_coarse_pixel_size_nm", "AF coarse pixel size", "f", 10.0, {"max": 1000.0, "dec": 1, "suffix": " nm"}),
+    ]),
+    ("Autostig", [
+        ("as_enabled", "AS enabled", "b", True, {}),
+        ("as_support_points", "AS support points", "i", 20, {"max": 500}),
+        ("as_range", "AS range", "i", 10, {"max": 1000}),
+        ("as_scan_rate", "AS scan rate", "i", 4, {"max": 30}),
+        ("as_pixel_size_nm", "AS pixel size", "f", 10.0, {"max": 1000.0, "dec": 1, "suffix": " nm"}),
+    ]),
+    ("Plane-update robustness", [
+        ("plane_update_min_points", "Plane-update min points", "i", 3, {"max": 100}),
+        ("plane_update_strict", "Plane-update strict (abort on any fail)", "b", False, {}),
+        ("one_point_offset_top_k", "1-pt offset: top-K candidates", "i", 5, {"max": 100}),
+        ("one_point_offset_mad_sigma", "1-pt offset: MAD sigma", "f", 2.5, {"max": 10.0, "dec": 2}),
+    ]),
+]
+
+
 class HiMcPage(BasePage):
     """Form-driven launcher for the acquisition + Live-QC pipeline."""
 
@@ -40,6 +84,7 @@ class HiMcPage(BasePage):
         # runtime state (BasePage calls setup_ui from __init__, so init here)
         self._pipeline_runner = None
         self._last_output_dir = None   # block folder / QC results dir for "Open"
+        self._extra_widgets = {}       # config_key -> (widget, kind) for _EXTRA_PARAM_GROUPS
 
         title = QLabel("HI-MC — Acquisition + Live QC")
         title.setStyleSheet("font-size: 18px; font-weight: 600; padding: 0 0 6px 0;")
@@ -68,6 +113,8 @@ class HiMcPage(BasePage):
         form_col.addWidget(self._build_route_group())
         form_col.addWidget(self._build_plane_group())
         form_col.addWidget(self._build_qc_group())
+        for _title, _specs in _EXTRA_PARAM_GROUPS:
+            form_col.addWidget(self._build_extra_group(_title, _specs))
         form_col.addWidget(self._build_advanced_group())
         form_col.addStretch(1)
 
@@ -246,6 +293,43 @@ class HiMcPage(BasePage):
         form.addRow("Save dashboard every:", self.spin_save_every)
         return box
 
+    # -- data-driven extra-param groups (flow through fm_extra) -------------
+    def _build_extra_widget(self, kind: str, default, opts: dict):
+        if kind == "b":
+            w = QCheckBox()
+            w.setChecked(bool(default))
+            return w
+        if kind == "i":
+            w = QSpinBox()
+            w.setRange(int(opts.get("min", 0)), int(opts.get("max", 1_000_000)))
+            w.setValue(int(default))
+            if opts.get("suffix"):
+                w.setSuffix(opts["suffix"])
+            return w
+        # float
+        w = QDoubleSpinBox()
+        w.setDecimals(int(opts.get("dec", 2)))
+        w.setRange(float(opts.get("min", 0.0)), float(opts.get("max", 1e9)))
+        w.setValue(float(default))
+        if opts.get("suffix"):
+            w.setSuffix(opts["suffix"])
+        return w
+
+    def _read_extra(self, w, kind: str):
+        if kind == "b":
+            return bool(w.isChecked())
+        if kind == "i":
+            return int(w.value())
+        return float(w.value())
+
+    def _build_extra_group(self, title: str, specs) -> QGroupBox:
+        box, form = self._group(title)
+        for key, label, kind, default, opts in specs:
+            w = self._build_extra_widget(kind, default, opts)
+            self._extra_widgets[key] = (w, kind)
+            form.addRow(label + ":", w)
+        return box
+
     def _build_advanced_group(self) -> QGroupBox:
         box = QGroupBox("Advanced overrides  (key = value, one per line; value is JSON)")
         box.setCheckable(True)
@@ -384,7 +468,10 @@ class HiMcPage(BasePage):
         if pfm:
             ui["prev_focusmap_dir"] = pfm
 
-        fm_extra = self._parse_overrides(self.txt_fm_extra.toPlainText(), "focus_map override")
+        # data-driven extra widgets (Stage/AF/AS/plane groups), then let the
+        # advanced text box override any of them (explicit wins).
+        fm_extra = {key: self._read_extra(w, kind) for key, (w, kind) in self._extra_widgets.items()}
+        fm_extra.update(self._parse_overrides(self.txt_fm_extra.toPlainText(), "focus_map override"))
         if fm_extra:
             ui["fm_extra"] = fm_extra
         qc_extra = self._parse_overrides(self.txt_qc_extra.toPlainText(), "live_qc override")
