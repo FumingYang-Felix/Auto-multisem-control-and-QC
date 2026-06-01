@@ -118,6 +118,14 @@ def build_run_config(ui: Dict[str, Any]) -> Dict[str, Any]:
     # advanced (optional)
     put("prev_focusmap_by_region", "prev_focusmap_by_region")
     put("prev_focusmap_dir", "prev_focusmap_dir")  # folder of prev_focusmap .txt
+    # If the user gave a prev_focusmap FOLDER (and no explicit per-region dict),
+    # make folder mode authoritative by clearing focus_map's HARDCODED
+    # prev_focusmap_by_region. Otherwise that dict's same-section fallback
+    # hijacks the region (e.g. S6R2 -> dict's S6R1 entry) and resolves a stale
+    # RELATIVE filename like 'w13_s6.txt' against the cwd instead of looking in
+    # the folder the user actually picked.
+    if fm.get("prev_focusmap_dir") and "prev_focusmap_by_region" not in fm:
+        fm["prev_focusmap_by_region"] = {}
     put("plane_update_method", "plane_update_method")
     put("initial_ol_mode", "initial_ol_mode")
     put("best_point_metric", "best_point_metric")
