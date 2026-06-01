@@ -11,6 +11,7 @@ from ..engine.workflow import WorkflowEngine
 from .widgets import LogPanel
 from .pages.control_page import ControlPage
 from .pages.acquisition_page import AcquisitionPage
+from .pages.himc_page import HiMcPage
 from .panels.parameters_panel import ParametersPanel
 from .panels.status_panel import StatusPanel
 from .panels.images_panel import ImagesPanel
@@ -20,6 +21,7 @@ class MainWindow(QMainWindow):
     # Signals for thread-safe UI updates
     operation_changed = Signal(str, int)  # status, progress
     position_changed = Signal(float, float, float)  # x, y, z
+    all_status_changed = Signal(dict)  # comprehensive status (from poll thread)
     
     def __init__(self, engine: WorkflowEngine):
         super().__init__()
@@ -28,6 +30,7 @@ class MainWindow(QMainWindow):
         # Connect signals to slots (for thread-safe UI updates)
         self.operation_changed.connect(self._handle_operation_slot)
         self.position_changed.connect(self._handle_position_slot)
+        self.all_status_changed.connect(self._handle_all_status_slot)
         
         self.setWindowTitle("MultiSEM Professional Control")
         self.resize(1600, 1000)
@@ -49,9 +52,11 @@ class MainWindow(QMainWindow):
         
         self.page_control = ControlPage(engine)
         self.page_acq = AcquisitionPage(engine)
-        
+        self.page_himc = HiMcPage(engine)
+
         self.pages.addWidget(self.page_control)
         self.pages.addWidget(self.page_acq)
+        self.pages.addWidget(self.page_himc)
         
         main_layout.addWidget(self.pages)
         
@@ -91,17 +96,19 @@ class MainWindow(QMainWindow):
         # Tab Buttons
         self.tab_control = QPushButton("Control & Map")
         self.tab_acq = QPushButton("Acquisition")
-        
-        self.tabs = [self.tab_control, self.tab_acq]
-        
+        self.tab_himc = QPushButton("HI-MC")
+
+        self.tabs = [self.tab_control, self.tab_acq, self.tab_himc]
+
         for i, tab in enumerate(self.tabs):
             tab.setCheckable(True)
             tab.setObjectName("NavTab")
             bar_layout.addWidget(tab)
-        
+
         # Connect after loop to avoid lambda capture issue
         self.tab_control.clicked.connect(lambda: self.switch_page(0))
         self.tab_acq.clicked.connect(lambda: self.switch_page(1))
+        self.tab_himc.clicked.connect(lambda: self.switch_page(2))
             
         bar_layout.addStretch()
         
@@ -151,6 +158,8 @@ class MainWindow(QMainWindow):
         # Remember the imaging-JSON path on the acquisition page — focus_map.py
         # (run as a subprocess) reads its regions/contours straight from it.
         self.params_panel.imaging_json_selected.connect(self.page_acq.set_imaging_json_path)
+        # ...and auto-fill the HI-MC page's imaging-JSON field from the same load.
+        self.params_panel.imaging_json_selected.connect(self.page_himc.set_imaging_json_path)
     
     def create_images_dock(self):
         """Create right-side floating images and documents panel"""
@@ -352,5 +361,14 @@ class MainWindow(QMainWindow):
         self.status_panel.set_operation(status, progress)
         
     def handle_all_status(self, status_dict: dict):
-        """Handle comprehensive status update from hardware"""
+        """Handle comprehensive status update from hardware.
+
+        This runs on the engine's daemon POLL THREAD, so it must NOT touch Qt
+        widgets directly — that's a cross-thread GUI access (undefined behaviour,
+        a real source of lag/instability over a long real-mode run). Marshal it
+        to the main thread via a queued signal, like position/operation do."""
+        self.all_status_changed.emit(status_dict)
+
+    def _handle_all_status_slot(self, status_dict: dict):
+        """Slot for thread-safe comprehensive status update (main thread)."""
         self.status_panel.update_all_status(status_dict)

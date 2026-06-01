@@ -49,6 +49,8 @@ _DIRECTION_MAP = {
 }
 # Start-position combo text -> focus_map start_position token.
 _START_MAP = {
+    "top": "TOP",
+    "bottom": "BOTTOM",
     "bottom left": "BOTTOM",
     "bottom right": "BOTTOM",
     "top left": "TOP",
@@ -118,6 +120,7 @@ def build_run_config(ui: Dict[str, Any]) -> Dict[str, Any]:
     put("prev_focusmap_dir", "prev_focusmap_dir")  # folder of prev_focusmap .txt
     put("plane_update_method", "plane_update_method")
     put("initial_ol_mode", "initial_ol_mode")
+    put("best_point_metric", "best_point_metric")
     # any extra focus_map keys passed verbatim
     extra_fm = ui.get("fm_extra")
     if isinstance(extra_fm, dict):

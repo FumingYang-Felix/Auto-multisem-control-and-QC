@@ -551,6 +551,10 @@ class LogPanel(QGroupBox):
         self.layout = QVBoxLayout()
         self.text_edit = QTextEdit()
         self.text_edit.setReadOnly(True)
+        # Cap the log so a long acquisition (the pipeline subprocess prints many
+        # lines per tile) can't grow the document unbounded — an unbounded
+        # QTextEdit is a real source of UI lag over a long run.
+        self.text_edit.document().setMaximumBlockCount(5000)
         self.layout.addWidget(self.text_edit)
         self.setLayout(self.layout)
 
