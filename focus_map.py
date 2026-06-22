@@ -75,6 +75,12 @@ CONFIG: Dict[str, Any] = {
     # dict to {} (or leave it) and just set this to use folder mode exclusively.
     "prev_focusmap_dir": None,
 
+    # When process_all_regions + prev_focusmap_dir: a preflight resolves+validates
+    # EVERY region's slice_<N>_FocusMap.txt up front (before touching the scope).
+    #   False (default) -> abort the whole run if any region is missing its file
+    #   True            -> warn + skip those regions, image the rest
+    "preflight_skip_missing": False,
+
 
     # region ordering when process_all_regions=True
     "region_order_method": "SHORTEST_PATH",   # JSON / SHORTEST_PATH
@@ -3034,8 +3040,10 @@ def resolve_prev_focusmap_path(region_name: str) -> str:
                 f"Cannot extract a section number from region '{region_name}' "
                 f"to match a prev_focusmap file in {prev_dir_abs}")
         sec = int(m.group(1))
-        # match 's<sec>' as a token: 's25' matches w15_s25.txt but NOT s250.
-        pat = re.compile(rf'(?:^|[_\-]) ?[sS]0*{sec}(?=$|[_\-.])', re.X)
+        # match an 's<sec>' OR 'slice<sec>' token: 's25'/'slice_25' match
+        # w15_s25.txt / slice_25_FocusMap.txt (the raw-data naming) but NOT
+        # s250 / slice_250 (right boundary) and NOT slice_16 for sec=6.
+        pat = re.compile(rf'(?:^|[_\-])(?:slice[_\-]?|[sS])0*{sec}(?=$|[_\-.])', re.I)
         matches = sorted(
             f for f in os.listdir(prev_dir_abs)
             if f.lower().endswith(".txt") and pat.search(os.path.splitext(f)[0])
@@ -3327,6 +3335,88 @@ def _run_one_region_body(
 # MAIN
 # =============================================================================
 
+def _count_focusmap_data_rows(path: str) -> int:
+    """Count rows that look like real focus-map data (>=10 comma fields with a
+    parseable x,y in cols 2,3). A present-but-empty/garbage file returns 0 so the
+    preflight can reject it instead of failing mid-run inside the plane fit."""
+    n = 0
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                parts = line.split(",")
+                if len(parts) < 10:
+                    continue
+                try:
+                    float(parts[2]); float(parts[3])
+                    n += 1
+                except (ValueError, IndexError):
+                    continue
+    except Exception:
+        return 0
+    return n
+
+
+def preflight_resolve_prev_focusmaps(json_file: str, region_names: List[str]) -> List[str]:
+    """Resolve + validate the prev_focusmap .txt for EVERY region up front.
+
+    Reuses resolve_prev_focusmap_path() (so resolution semantics are identical to
+    the per-region path) but runs once, before any hardware work, so a missing
+    slice_<N>_FocusMap.txt aborts the whole run immediately instead of after hours
+    of imaging. Honors CONFIG['preflight_skip_missing']:
+        False (default) -> raise (abort) if any region has no usable file
+        True            -> warn + drop those regions, return the survivors
+    Prints a [Preflight] summary (keywords FAILED/WARNING/skip so the GUI colours
+    the lines). Returns the region_names to actually process.
+    """
+    resolved: Dict[str, str] = {}
+    failures: List[Tuple[str, str]] = []
+    for rn in region_names:
+        try:
+            p = resolve_prev_focusmap_path(rn)
+            if not os.path.exists(p):
+                raise FileNotFoundError(f"resolved but not on disk: {p}")
+            if os.path.getsize(p) <= 0:
+                raise ValueError(f"file is empty: {p}")
+            n_rows = _count_focusmap_data_rows(p)
+            min_rows = max(3, int(CONFIG.get("plane_update_min_points", 3) or 3))
+            if n_rows < min_rows:
+                raise ValueError(f"only {n_rows} usable data row(s) (need >={min_rows}): {p}")
+            resolved[rn] = p
+        except Exception as exc:
+            failures.append((rn, str(exc).splitlines()[0]))
+
+    print("=" * 78)
+    print(f"[Preflight] prev_focusmap check for {len(region_names)} region(s) "
+          f"(dir={CONFIG.get('prev_focusmap_dir')}):")
+    reason_by_region = dict(failures)
+    for rn in region_names:
+        if rn in resolved:
+            print(f"[Preflight]   {rn} -> {os.path.basename(resolved[rn])} (OK)")
+        else:
+            print(f"[Preflight]   {rn} -> NO prev focusmap: {reason_by_region.get(rn, '?')}")
+    print(f"[Preflight] {len(resolved)} OK, {len(failures)} missing.")
+    print("=" * 78)
+
+    if not failures:
+        return region_names
+
+    if not CONFIG.get("preflight_skip_missing", False):
+        bad = ", ".join(rn for rn, _ in failures)
+        raise RuntimeError(
+            f"[Preflight] FAILED: {len(failures)} region(s) have no usable prev_focusmap "
+            f"({bad}). Aborting before acquisition. Set preflight_skip_missing=true to "
+            f"skip them and image the rest instead.")
+
+    ok_names = [rn for rn in region_names if rn in resolved]
+    for rn, reason in failures:
+        print(f"[Preflight] WARNING: skipping region {rn} (no prev focusmap: {reason})")
+    if not ok_names:
+        raise RuntimeError(
+            "[Preflight] FAILED: no region has a usable prev_focusmap; nothing to image.")
+    print(f"[Preflight] proceeding with {len(ok_names)} region(s): {ok_names}")
+    return ok_names
+
+
 def main():
     run_ts = time.strftime("%Y%m%d_%H%M%S")
     block_folder = os.path.join(CONFIG["output_root"], f"{CONFIG['czi_name']}_{run_ts}")
@@ -3380,22 +3470,8 @@ def main():
     if not os.path.exists(json_file):
         raise FileNotFoundError(f"JSON not found: {json_file}")
 
-    print("\nConnecting...")
-    conn = MSEMConnection()
-    conn.connect_and_initialize()
-    print("Connected.\n")
-
-    ensure_beam_and_scan(conn)
-    reset_af_as_and_set_beams(conn)
-
-    cur_speed = safe_get_double(conn, "AP_STAGE_SPEED_LIMIT")
-    print(f"[Stage] Current AP_STAGE_SPEED_LIMIT = {cur_speed}%")
-    if CONFIG["stage_speed_limit_pct"] is not None:
-        target_speed = float(CONFIG["stage_speed_limit_pct"])
-        safe_set_double(conn, "AP_STAGE_SPEED_LIMIT", target_speed)
-        readback = safe_get_double(conn, "AP_STAGE_SPEED_LIMIT")
-        print(f"[Stage] Set AP_STAGE_SPEED_LIMIT to {target_speed}% (readback: {readback}%)")
-
+    # Decide which regions to process (pure file/JSON work — no hardware) FIRST,
+    # so the prev_focusmap preflight can fail fast BEFORE we touch the scope.
     process_all = bool(CONFIG.get("process_all_regions", False))
     region_name = CONFIG.get("region_name", None)
 
@@ -3411,6 +3487,28 @@ def main():
         print(f"[RegionFilter] '{region_filter}' matched {len(region_names)}/{before_count} regions")
 
     print(f"[Regions] Will process {len(region_names)} region(s): {region_names}")
+
+    # Preflight: when processing all regions from a prev_focusmap FOLDER, resolve
+    # + validate every region's slice_<N>_FocusMap.txt now so a missing section
+    # aborts (or is skipped) BEFORE hours of imaging, not mid-run.
+    if process_all and CONFIG.get("prev_focusmap_dir"):
+        region_names = preflight_resolve_prev_focusmaps(json_file, region_names)
+
+    print("\nConnecting...")
+    conn = MSEMConnection()
+    conn.connect_and_initialize()
+    print("Connected.\n")
+
+    ensure_beam_and_scan(conn)
+    reset_af_as_and_set_beams(conn)
+
+    cur_speed = safe_get_double(conn, "AP_STAGE_SPEED_LIMIT")
+    print(f"[Stage] Current AP_STAGE_SPEED_LIMIT = {cur_speed}%")
+    if CONFIG["stage_speed_limit_pct"] is not None:
+        target_speed = float(CONFIG["stage_speed_limit_pct"])
+        safe_set_double(conn, "AP_STAGE_SPEED_LIMIT", target_speed)
+        readback = safe_get_double(conn, "AP_STAGE_SPEED_LIMIT")
+        print(f"[Stage] Set AP_STAGE_SPEED_LIMIT to {target_speed}% (readback: {readback}%)")
 
     for i, one_region_name in enumerate(region_names, start=1):
         run_one_region(conn, json_file, one_region_name, i, block_folder=block_folder)

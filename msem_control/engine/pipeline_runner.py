@@ -126,6 +126,7 @@ def build_run_config(ui: Dict[str, Any]) -> Dict[str, Any]:
     # the folder the user actually picked.
     if fm.get("prev_focusmap_dir") and "prev_focusmap_by_region" not in fm:
         fm["prev_focusmap_by_region"] = {}
+    put("preflight_skip_missing", "preflight_skip_missing")  # all-region focusmap preflight policy
     put("plane_update_method", "plane_update_method")
     put("initial_ol_mode", "initial_ol_mode")
     put("best_point_metric", "best_point_metric")
@@ -211,9 +212,14 @@ class PipelineRunner(QObject):
         config_path: Optional[str] = None,
         python_exe: Optional[str] = None,
         script: str = "main_live_qc.py",
+        args: Optional[list] = None,
     ) -> bool:
         """Write `config` to JSON and spawn the pipeline. Returns False if a run
-        is already in progress or the config couldn't be written."""
+        is already in progress or the config couldn't be written.
+
+        `args` overrides the child argv (defaults to just [script]). The SFN
+        calibration uses it to launch `auto_stage_calib.py --markers ... --affine_out ...`
+        which is argparse-driven (it does NOT read MSEM_CONFIG_JSON)."""
         if self.is_running():
             self.error.emit("A pipeline run is already in progress.")
             return False
@@ -246,11 +252,12 @@ class PipelineRunner(QObject):
         proc.started.connect(self.started)
 
         exe = python_exe or sys.executable
+        argv = args if args is not None else [script]
         proc.setProgram(exe)
-        proc.setArguments([script])
+        proc.setArguments(argv)
         self._proc = proc
         self.log_line.emit(
-            f"[runner] launch: {exe} {script}  (cwd={workdir})  "
+            f"[runner] launch: {exe} {' '.join(argv)}  (cwd={workdir})  "
             f"MSEM_CONFIG_JSON={config_path}"
         )
         proc.start()

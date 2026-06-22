@@ -18,6 +18,14 @@ import numpy as np
 
 from qc_algorithm import aggregate_mfov_quality, compute_single_image_quality, dumps_json
 
+# Downsampled overview images (per-MFOV + per-region). Best-effort: if the module
+# or PIL stitch fails to import, QC still runs (overview just won't be produced).
+try:
+    from qc_overview import render_mfov_overview, RegionOverviewAccumulator
+except Exception:  # pragma: no cover - overview is optional
+    render_mfov_overview = None
+    RegionOverviewAccumulator = None
+
 
 DEFAULT_BEAM_REGEXES = [
     r"beam[_\- ]?(\d{1,3})",
@@ -408,6 +416,17 @@ def qc_worker_main(task_queue: Any, viewer_queue: Any, cfg: Dict[str, Any]) -> N
                 jitter_warn_threshold=jitter_warn_thresh,
             )
             result = mfov.to_dict()
+
+            # Per-MFOV downsampled overview (best-effort; never breaks QC). Writes
+            # overview_mfov.png into the tile folder and records its path on the
+            # result so the viewer can build the region overview from it.
+            if render_mfov_overview is not None and bool(cfg.get("overview_enabled", True)):
+                try:
+                    ov_png = render_mfov_overview(tile_folder, prefix, cfg)
+                    if ov_png:
+                        result["overview_mfov_png"] = ov_png
+                except Exception:
+                    pass
         except Exception as exc:
             tb = traceback.format_exc()
             try:
@@ -1550,6 +1569,16 @@ def _qc_viewer_main_impl(layout: List[Dict[str, Any]], viewer_queue: Any, cfg: D
     results_dir.mkdir(parents=True, exist_ok=True)
     snapshot_path = results_dir / "live_qc_dashboard.png"
 
+    # Per-region downsampled overview accumulator (best-effort). Caches each
+    # MFOV's overview thumbnail at its layout position; rendered at save_every + STOP.
+    region_ov = None
+    if RegionOverviewAccumulator is not None and bool(cfg.get("overview_region_enabled", True)):
+        try:
+            region_ov = RegionOverviewAccumulator(layout, results_dir, cfg)
+        except Exception as _ov_exc:
+            print(f"[LiveQC] region overview disabled (init failed): {_ov_exc}")
+            region_ov = None
+
     region_label = str(cfg.get("region_label", "") or "")
     block_label = str(cfg.get("block_label", "") or "")
     low_quality_threshold = float(cfg.get("low_quality_threshold", 10.0))
@@ -1797,6 +1826,8 @@ def _qc_viewer_main_impl(layout: List[Dict[str, Any]], viewer_queue: Any, cfg: D
             except Exception:
                 pass
             _persist_html_now()
+            if region_ov is not None:
+                region_ov.render()
             plt.pause(1.0)
             plt.close(fig)
             break
@@ -1808,6 +1839,8 @@ def _qc_viewer_main_impl(layout: List[Dict[str, Any]], viewer_queue: Any, cfg: D
         result = msg["result"]
         tile_idx = int(result["tile_idx"])
         results_by_tile[tile_idx] = result
+        if region_ov is not None and result.get("overview_mfov_png"):
+            region_ov.add_png(tile_idx, result["overview_mfov_png"])
         q = float(result.get("quality", -100.0) or -100.0)
         stig_x = float(result.get("stig_x_med", 0.0) or 0.0)
         stig_y = float(result.get("stig_y_med", 0.0) or 0.0)
@@ -1893,6 +1926,8 @@ def _qc_viewer_main_impl(layout: List[Dict[str, Any]], viewer_queue: Any, cfg: D
             # viewer is killed before STOP arrives (the original failure
             # mode where only the last STOP-d section had any HTML).
             _persist_html_now()
+            if region_ov is not None:
+                region_ov.render()
             last_save_done = done
 
 

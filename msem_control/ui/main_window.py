@@ -12,6 +12,7 @@ from .widgets import LogPanel
 from .pages.control_page import ControlPage
 from .pages.acquisition_page import AcquisitionPage
 from .pages.himc_page import HiMcPage
+from .pages.sfn_page import SfnPage
 from .panels.parameters_panel import ParametersPanel
 from .panels.status_panel import StatusPanel
 from .panels.images_panel import ImagesPanel
@@ -53,10 +54,13 @@ class MainWindow(QMainWindow):
         self.page_control = ControlPage(engine)
         self.page_acq = AcquisitionPage(engine)
         self.page_himc = HiMcPage(engine)
+        self.page_sfn = SfnPage(engine)
+        self.page_sfn.set_himc_page(self.page_himc)
 
         self.pages.addWidget(self.page_control)
         self.pages.addWidget(self.page_acq)
         self.pages.addWidget(self.page_himc)
+        self.pages.addWidget(self.page_sfn)
         
         main_layout.addWidget(self.pages)
         
@@ -97,8 +101,9 @@ class MainWindow(QMainWindow):
         self.tab_control = QPushButton("Control & Map")
         self.tab_acq = QPushButton("Acquisition")
         self.tab_himc = QPushButton("HI-MC")
+        self.tab_sfn = QPushButton("SFN")
 
-        self.tabs = [self.tab_control, self.tab_acq, self.tab_himc]
+        self.tabs = [self.tab_control, self.tab_acq, self.tab_himc, self.tab_sfn]
 
         for i, tab in enumerate(self.tabs):
             tab.setCheckable(True)
@@ -109,6 +114,7 @@ class MainWindow(QMainWindow):
         self.tab_control.clicked.connect(lambda: self.switch_page(0))
         self.tab_acq.clicked.connect(lambda: self.switch_page(1))
         self.tab_himc.clicked.connect(lambda: self.switch_page(2))
+        self.tab_sfn.clicked.connect(lambda: self.switch_page(3))
             
         bar_layout.addStretch()
         
@@ -164,6 +170,7 @@ class MainWindow(QMainWindow):
         if hasattr(self.params_panel, "imaging_json_selected"):
             self.params_panel.imaging_json_selected.connect(self.page_acq.set_imaging_json_path)
             self.params_panel.imaging_json_selected.connect(self.page_himc.set_imaging_json_path)
+            self.params_panel.imaging_json_selected.connect(self.page_sfn.set_imaging_json_path)
         else:
             print("[main_window] WARNING: ParametersPanel has no "
                   "'imaging_json_selected' signal — your parameters_panel.py is "

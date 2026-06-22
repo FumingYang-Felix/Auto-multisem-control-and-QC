@@ -72,6 +72,17 @@ LIVE_QC_CONFIG: Dict[str, Any] = {
     "jitter_display_max": 2.5,           # upper bound of jitter color scale
     "stig_display_max": 50.0,            # absolute-magnitude clip for the quiver arrow length
     "stig_centered_display_max": 30.0,   # ± range for the stig hex color = (value − running_median); cancels constant AS offset
+
+    # Downsampled overview images (qc_overview.py).
+    "overview_enabled": True,            # per-MFOV overview PNG in each tile folder
+    "overview_region_enabled": True,     # per-region stitched overview PNG in LiveQC dir
+    "overview_ds": 16,                   # per-MFOV downsample factor (beam px / ds)
+    "overview_padding": 80,              # full-res stitch padding (when coords present)
+    "overview_beam_layout": "auto",      # auto | coords_file (use image_coordinates.txt) — else grid montage
+    "overview_region_thumb_px": 64,      # max dim of each cached MFOV thumbnail
+    "overview_region_canvas_px": 2000,   # target size of the region overview canvas
+    "overview_mfov_name": "overview_mfov.png",
+    "overview_region_name": "live_qc_region_overview.png",
 }
 
 

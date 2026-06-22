@@ -153,8 +153,8 @@ class HiMcPage(BasePage):
         form.addRow("Imaging JSON:", self._file_row(self.edit_json, self._browse_json))
 
         self.edit_pfm = QLineEdit()
-        self.edit_pfm.setPlaceholderText("folder of prev_focusmap *.txt (matched per section)")
-        form.addRow("Prev focus-map dir:", self._file_row(self.edit_pfm, self._browse_pfm))
+        self.edit_pfm.setPlaceholderText("raw data folder with slice_<N>_FocusMap.txt (matched per section)")
+        form.addRow("Raw focus-map dir:", self._file_row(self.edit_pfm, self._browse_pfm))
 
         self.edit_output = QLineEdit()
         self.edit_output.setPlaceholderText(r"output root, e.g. V:\HI-MC\...\API")
@@ -173,6 +173,12 @@ class HiMcPage(BasePage):
         box, form = self._group("Region selection")
         self.chk_process_all = QCheckBox("Process ALL regions in the JSON")
         form.addRow(self.chk_process_all)
+
+        # When processing all regions from a raw focus-map folder, a preflight
+        # checks every region's slice_<N>_FocusMap.txt up front. Default = abort
+        # the run if any is missing; tick this to warn+skip and image the rest.
+        self.chk_preflight_skip = QCheckBox("On missing focus-map: skip that region (else abort run)")
+        form.addRow(self.chk_preflight_skip)
 
         # Both fields stay editable regardless of the checkbox; focus_map uses
         # region_name when 'process all' is OFF, region_name_filter when it's ON.
@@ -467,6 +473,7 @@ class HiMcPage(BasePage):
         pfm = self.edit_pfm.text().strip()
         if pfm:
             ui["prev_focusmap_dir"] = pfm
+            ui["preflight_skip_missing"] = self.chk_preflight_skip.isChecked()
 
         # data-driven extra widgets (Stage/AF/AS/plane groups), then let the
         # advanced text box override any of them (explicit wins).
@@ -611,6 +618,9 @@ class HiMcPage(BasePage):
         self._reset_after_run()
 
     def _on_error(self, msg: str):
+        # QProcess error fires instead of finished -> resume hardware here too,
+        # else the scope stays paused after a failed launch/crash.
+        self._reset_after_run()
         self.log_panel.append_log("HI-MC", "ERROR", msg)
 
     # -- misc ---------------------------------------------------------------

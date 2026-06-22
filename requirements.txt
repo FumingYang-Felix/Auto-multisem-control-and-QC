@@ -1,13 +1,20 @@
 # MultiSEM GUI + acquisition pipeline — core dependencies (cross-platform)
 # Install with the one-click setup:  python setup_env.py   (see setup_env.*)
 
-# GUI framework
-PySide6>=6.5,<6.11
+# GUI framework.
+# Floor is 6.4.3 (NOT 6.5): Windows 10 / Server 2016 (build < 17763) can only
+# run Qt 6.4.x, which needs Python <=3.11. On modern Windows pip will pick a
+# newer wheel automatically. setup_env.py pins 6.4.3 when it detects an old build.
+PySide6>=6.4.3,<6.11
 
 # QC + acquisition pipeline (qc_algorithm.py, live_qc_support.py)
 numpy>=1.24
 Pillow>=10.0
 matplotlib>=3.7
+
+# SFN stage-calibration (auto_stage_calib.py) — L-marker detection on stitched
+# mosaics. Only needed if you use the SFN page's "Run calibration".
+opencv-python>=4.5
 
 # --- Optional (uncomment if you load Zeiss .czi optical images in the map) ---
 # aicspylibczi>=3.0
