@@ -2632,23 +2632,47 @@ def compute_line_id_for_tile(y: float, y_ref_list: List[float], tol: float) -> i
 # Output config per tile
 # =============================================================================
 
+def build_block_name(json_file: str, pixel_nm: float, ts: str) -> str:
+    """Block folder name 'w#_h#_Slice#_##NM_<timestamp>' parsed from the imaging
+    JSON filename (e.g. w13_h25_slice1.json -> w13_h25_Slice1) + pixel size + ts.
+    Falls back to the raw stem if the w/h/slice tokens aren't all present."""
+    stem = os.path.splitext(os.path.basename(str(json_file or "block")))[0]
+    w = re.search(r"w(\d+)", stem, re.I)
+    h = re.search(r"h(\d+)", stem, re.I)
+    s = re.search(r"slice[_\-]?(\d+)", stem, re.I)
+    base = f"w{w.group(1)}_h{h.group(1)}_Slice{s.group(1)}" if (w and h and s) else stem
+    try:
+        pn = float(pixel_nm)
+        nm = f"{int(pn)}" if pn == int(pn) else f"{pn:g}"
+    except Exception:
+        nm = str(pixel_nm)
+    return f"{base}_{nm}NM_{ts}"
+
+
 def configure_output_for_tile(conn: MSEMConnection, output_root: str, czi_name: str, region_idx: int,
                               tile_idx: int, prefix_base: str, combo_format: str,
                               block_folder: Optional[str] = None,
                               region_label: Optional[str] = None) -> Dict[str, Any]:
     if block_folder is None:
         ts = time.strftime("%Y%m%d_%H%M%S")
-        block_folder = os.path.join(output_root, f"{czi_name}_{ts}")
+        block_folder = os.path.join(
+            output_root, build_block_name(CONFIG.get("json_file"), CONFIG.get("acq_pixel_size_nm"), ts))
     if region_label:
         safe_label = re.sub(r'[\\/:*?"<>|]+', "_", str(region_label)).strip().rstrip(".")
         region_dir_name = safe_label or f"Region_{region_idx}"
     else:
         region_dir_name = f"Region_{region_idx}"
     region_folder = os.path.join(block_folder, region_dir_name)
-    tile_folder = os.path.join(region_folder, f"{tile_idx:04d}")
+    # MFOV folder: root\<block>\S##R#\mfov#\
+    tile_folder = os.path.join(region_folder, f"mfov{tile_idx}")
     os.makedirs(tile_folder, exist_ok=True)
 
-    prefix_value = f"{prefix_base}{tile_idx:04d}_"
+    # Image filename: mfov#_<timestamp>_<beam:03d>.<ext>. The Zeiss API appends
+    # the 3-digit beam number LAST (it can't go after a timestamp), so the ts is
+    # baked into the prefix as a literal (computed here, NOT the API %ts token)
+    # so focus_map + LiveQC can still predict the filename to find each beam.
+    tile_ts = time.strftime("%Y%m%d_%H%M%S")
+    prefix_value = f"mfov{tile_idx}_{tile_ts}_"
 
     safe_set_double(conn, "DP_IMAGE_LOCATION", 1.0)
 
@@ -3419,7 +3443,9 @@ def preflight_resolve_prev_focusmaps(json_file: str, region_names: List[str]) ->
 
 def main():
     run_ts = time.strftime("%Y%m%d_%H%M%S")
-    block_folder = os.path.join(CONFIG["output_root"], f"{CONFIG['czi_name']}_{run_ts}")
+    block_folder = os.path.join(
+        CONFIG["output_root"],
+        build_block_name(CONFIG.get("json_file"), CONFIG.get("acq_pixel_size_nm"), run_ts))
     os.makedirs(block_folder, exist_ok=True)
     print(f"[Output] Global block folder: {block_folder}")
 

@@ -214,7 +214,12 @@ def make_live_qc_acquire_tiles(acq, live_qc_cfg: Dict[str, Any]):
 
         if block_folder is None:
             ts = time.strftime("%Y%m%d_%H%M%S")
-            block_folder = os.path.join(acq.CONFIG["output_root"], f"{acq.CONFIG['czi_name']}_{ts}")
+            try:
+                block_name = acq.build_block_name(
+                    acq.CONFIG.get("json_file"), acq.CONFIG.get("acq_pixel_size_nm"), ts)
+            except Exception:
+                block_name = f"{acq.CONFIG['czi_name']}_{ts}"
+            block_folder = os.path.join(acq.CONFIG["output_root"], block_name)
 
         os.makedirs(block_folder, exist_ok=True)
         print(f"[Output] Block folder: {block_folder}")
