@@ -12,13 +12,21 @@ Open **PowerShell** and paste (the whole block):
 
 ```powershell
 cd D:\mSEMAPI\himc_app
-git pull origin gui-integration
+git pull
 ```
 
 > First time, and the `himc_app` folder doesn't exist yet? Create it once (one time only):
 > ```powershell
 > cd D:\mSEMAPI
-> git clone -b gui-integration https://github.com/FumingYang-Felix/Auto-multisem-control-and-QC.git himc_app
+> git clone https://github.com/FumingYang-Felix/Auto-multisem-control-and-QC.git himc_app
+> ```
+>
+> Existing install that was cloned on the old `gui-integration` branch? Switch it to `main` once:
+> ```powershell
+> cd D:\mSEMAPI\himc_app
+> git fetch origin
+> git checkout main
+> git pull
 > ```
 
 `Already up to date.` or `Updating ...` are both fine.
