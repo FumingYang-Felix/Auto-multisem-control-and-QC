@@ -179,6 +179,7 @@ class PipelineRunner(QObject):
     region_started = Signal(str, int)      # region_name, region_idx (1-based)
     tile_progress = Signal(int, int)       # order, total (within current region)
     qc_tile = Signal(int)                  # tile_idx queued to LiveQC
+    beam_arc = Signal(str)                 # a [BeamArc] status line (arc detected / recovery)
     region_done = Signal(str)              # region_name finished
     finished = Signal(int)                 # process exit code (0 == clean)
     error = Signal(str)                    # fatal launch / process error
@@ -188,6 +189,7 @@ class PipelineRunner(QObject):
     _RE_REGION_DONE = re.compile(r"\[Region\]\s+DONE\s+region_name=(\S+)")
     _RE_ACQ_TILE = re.compile(r"\[AcqTile\]\s+order=(\d+)/(\d+)")
     _RE_QC_TILE = re.compile(r"\[LiveQC\]\s+queued tile\s+(\d+)")
+    _RE_BEAM_ARC = re.compile(r"\[BeamArc\]\s+(.*)")
 
     def __init__(self, parent: Optional[QObject] = None):
         super().__init__(parent)
@@ -318,6 +320,10 @@ class PipelineRunner(QObject):
         m = self._RE_QC_TILE.search(line)
         if m:
             self.qc_tile.emit(int(m.group(1)))
+            return
+        m = self._RE_BEAM_ARC.search(line)
+        if m:
+            self.beam_arc.emit(m.group(1))
             return
 
     def _on_finished(self, code: int, _status) -> None:

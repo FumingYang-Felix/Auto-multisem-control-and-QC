@@ -3774,6 +3774,7 @@ class AcquisitionPage(BasePage):
             r.region_done.connect(self._on_pipeline_region_done)
             r.finished.connect(self._on_pipeline_finished)
             r.error.connect(self._on_pipeline_error)
+            r.beam_arc.connect(self._on_pipeline_beam_arc)
 
         # Hand hardware to the subprocess: stop engine polling + manual ops so the
         # two software components don't fight over the scope (Zeiss API warning).
@@ -3804,6 +3805,16 @@ class AcquisitionPage(BasePage):
     # ------------------------------------------------------------------
     # PipelineRunner signal handlers (subprocess -> GUI)
     # ------------------------------------------------------------------
+    def _on_pipeline_beam_arc(self, msg: str):
+        # drive the top-level "Beam Arc" status indicator (the line itself is
+        # already shown in the log via the normal log_line path)
+        try:
+            win = self.window()
+            if hasattr(win, "status_panel"):
+                win.status_panel.set_beam_arc(msg)
+        except Exception:
+            pass
+
     def _on_pipeline_log(self, line: str):
         """Mirror one subprocess output line into the GUI log, tagged by its
         [bracket] prefix and coloured by severity keywords."""

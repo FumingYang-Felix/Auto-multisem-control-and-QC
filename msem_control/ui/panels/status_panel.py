@@ -166,10 +166,12 @@ class StatusPanel(QWidget):
         self.row_beam_on = StatusRow("Beam")
         self.row_beam_lock = StatusRow("Beam Lock")
         self.row_emitter = StatusRow("Emitter Current")
+        self.row_beam_arc = StatusRow("Beam Arc")
         
         beam_layout.addWidget(self.row_beam_on)
         beam_layout.addWidget(self.row_beam_lock)
         beam_layout.addWidget(self.row_emitter)
+        beam_layout.addWidget(self.row_beam_arc)
         
         layout.addWidget(beam_group)
         
@@ -268,6 +270,18 @@ class StatusPanel(QWidget):
         else:
             self.row_stage_moving.set_value("No", "green")
         
+    def set_beam_arc(self, msg: str):
+        """Update the Beam Arc indicator from a [BeamArc] pipeline status line."""
+        low = (msg or "").lower()
+        if "beam arc @" in low:
+            self.row_beam_arc.set_value("ARC — recovering", "red")
+        elif "recovery ok" in low or "beam restored" in low or "resuming" in low:
+            self.row_beam_arc.set_value("recovered", "green")
+        elif "monitor started" in low:
+            self.row_beam_arc.set_value("armed", "green")
+        elif "not started" in low or "unavailable" in low:
+            self.row_beam_arc.set_value("off", "gray")
+
     def set_beam_status(self, is_on: bool, is_locked: bool = False, emitter_current: float = 0):
         if is_on:
             self.row_beam_on.set_value("ON", "green")

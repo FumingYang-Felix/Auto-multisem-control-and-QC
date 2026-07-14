@@ -201,6 +201,15 @@ CONFIG: Dict[str, Any] = {
     "ensure_beam_on": True,
     "ensure_continuous_scan": True,
 
+    # beam-arc guard: real-time detection of "beam clearance failure" arcs from
+    # the mSEM service log -> pause -> recover -> resume. See beam_arc_monitor.py.
+    "beam_arc_enabled": True,
+    "beam_arc_log_dir": r"C:\ProgramData\CarlZeiss\mSEM",
+    "beam_arc_recovery_mode": "guided",   # "guided": operator runs Chamber reset EHT;
+                                          # "auto": API recovery sequence (VALIDATE ON-SCOPE FIRST);
+                                          # "flag_only": report but do not pause
+    "beam_arc_min_outputs": 2,            # HV outputs tripped within ~1s to confirm an arc
+
     # reset AF/AS + beam restriction
     "reset_af_before_region": True,
     "reset_as_before_region": True,
@@ -2781,6 +2790,36 @@ def apply_acq_scan_settings(conn: MSEMConnection) -> Dict[str, Any]:
 # Acquire tiles
 # =============================================================================
 
+# Beam-arc guard, lazily started inside the tile loop (idempotent). Watches the
+# mSEM service log and pauses/recovers acquisition on a beam-clearance arc.
+_ARC_GUARD = None
+
+
+def _beam_arc_guard():
+    """Lazily create + start the beam-arc guard (idempotent). Returns the guard,
+    or False if disabled / unavailable. Shared by focus_map.acquire_tiles (direct
+    runs) AND main_live_qc's monkeypatched acquire_tiles (GUI / live-QC runs), so
+    the arc monitor is active on every acquisition path."""
+    global _ARC_GUARD
+    if _ARC_GUARD is None:
+        if not CONFIG.get("beam_arc_enabled", True):
+            _ARC_GUARD = False
+            return _ARC_GUARD
+        try:
+            from beam_arc_guard import BeamArcGuard
+            _ARC_GUARD = BeamArcGuard(
+                log_dir=CONFIG.get("beam_arc_log_dir", r"C:\ProgramData\CarlZeiss\mSEM"),
+                recovery_mode=CONFIG.get("beam_arc_recovery_mode", "guided"),
+                min_outputs=int(CONFIG.get("beam_arc_min_outputs", 2)),
+            )
+            _ARC_GUARD.start()
+            print(f"[BeamArc] monitor started (dir={_ARC_GUARD.log_dir}, mode={_ARC_GUARD.recovery_mode})", flush=True)
+        except Exception as e:
+            print(f"[BeamArc] monitor NOT started: {e}", flush=True)
+            _ARC_GUARD = False
+    return _ARC_GUARD
+
+
 def acquire_tiles(
     conn: MSEMConnection,
     tiles: List[Tuple[float, float]],
@@ -2802,6 +2841,9 @@ def acquire_tiles(
 
     os.makedirs(block_folder, exist_ok=True)
     print(f"[Output] Block folder: {block_folder}")
+
+    # --- beam-arc guard: start the shared log monitor (lazy, idempotent) ---
+    _beam_arc_guard()
 
     rc_off = conn.execute("CMD_SCAN_OFF")
     print(f"[Scan] CMD_SCAN_OFF rc={rc_off}")
@@ -2832,6 +2874,11 @@ def acquire_tiles(
 
     for order_i, tile_i0 in enumerate(route, start=1):
         t_tile0 = time.perf_counter()
+
+        # beam-arc guard: if the log monitor flagged an arc, pause here (between
+        # tiles), recover (guided/auto per CONFIG), then resume from this tile.
+        if _ARC_GUARD:
+            _ARC_GUARD.handle_if_arc(conn)
 
         plan = plans[tile_i0]
         tile_idx = plan.tile_idx

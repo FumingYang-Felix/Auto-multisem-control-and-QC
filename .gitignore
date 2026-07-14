@@ -56,3 +56,8 @@ Thumbs.db
 # GUI run artifacts (config the GUI writes before launching the pipeline)
 msem_run_config.json
 
+# Local reference material — kept out of git (large / proprietary / PII).
+# The beam-arc test uses the small tests/fixtures/sample_arc_log.xml instead.
+docs/*.pdf
+docs/mSEMService.log*.xml
+

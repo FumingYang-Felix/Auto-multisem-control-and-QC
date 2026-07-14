@@ -533,6 +533,7 @@ class HiMcPage(BasePage):
             r.region_done.connect(self._on_region_done)
             r.finished.connect(self._on_finished)
             r.error.connect(self._on_error)
+            r.beam_arc.connect(self._on_beam_arc)
 
         if self.engine is not None:
             try:
@@ -569,6 +570,16 @@ class HiMcPage(BasePage):
         self.btn_stop.setEnabled(False)
 
     # -- pipeline signal handlers ------------------------------------------
+    def _on_beam_arc(self, msg: str):
+        # drive the top-level "Beam Arc" status indicator (the line itself is
+        # already shown in the log via the normal log_line path)
+        try:
+            win = self.window()
+            if hasattr(win, "status_panel"):
+                win.status_panel.set_beam_arc(msg)
+        except Exception:
+            pass
+
     def _on_log(self, line: str):
         tag = "Pipeline"
         if line.startswith("[") and "]" in line:

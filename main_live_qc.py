@@ -224,6 +224,12 @@ def make_live_qc_acquire_tiles(acq, live_qc_cfg: Dict[str, Any]):
         os.makedirs(block_folder, exist_ok=True)
         print(f"[Output] Block folder: {block_folder}")
 
+        # beam-arc guard: start the shared monitor (defined in focus_map). The
+        # per-tile check below pauses/recovers on a beam-clearance arc. getattr
+        # fallback: an older deployed focus_map (no helper) degrades to no-guard
+        # instead of crashing the run.
+        _arc_guard = getattr(acq, "_beam_arc_guard", lambda: False)()
+
         region_idx = int(acq.CONFIG.get("region_idx", 1))
         region_label = _sanitize_label(acq.CONFIG.get("region_name"), f"Region_{region_idx}")
         block_label = Path(block_folder).name
@@ -322,6 +328,10 @@ def make_live_qc_acquire_tiles(acq, live_qc_cfg: Dict[str, Any]):
                     break
 
                 t_tile0 = time.perf_counter()
+
+                # beam-arc guard: pause here (between tiles) -> recover -> resume
+                if _arc_guard:
+                    _arc_guard.handle_if_arc(conn)
 
                 plan = plans[tile_i0]
                 tile_idx = plan.tile_idx
