@@ -157,6 +157,23 @@ CONFIG: Dict[str, Any] = {
     #   True            -> original behavior: any single failure aborts the region
     "plane_update_strict": False,
 
+    # -------------------------------------------------
+    # MANUAL_POINTS plane update (issue #8)
+    # When plane_update_method == "MANUAL_POINTS": ignore the JSON/auto support
+    # points and use operator-placed points (with optional hand-set focus/stig)
+    # from an external file (schema: see load_manual_focus_points). OFF by
+    # default (file=None) so every other plane_update_method is untouched.
+    #   manual_focus_mode:
+    #     "SKIP_AF" -> apply the operator's OL (+stig) verbatim, no AF/AS
+    #     "SEED_AF" -> seed OL with the operator's value, then AF/AS refine
+    # A point with no operator ol_uA is placement-only (AF/AS measures it there)
+    # regardless of mode. Contour/tiles still come from the imaging JSON; a prev
+    # focus-map is still required (initial OL + stig fallback).
+    # -------------------------------------------------
+    "manual_focus_points_file": None,
+    "manual_focus_mode": "SKIP_AF",
+    "manual_focus_seed_range_uA": 300,
+
     # DeepFocus paths
     "deepfocus_repo": r"D:\mSEMAPI\DeepFocus",
     "deepfocus_python_exe": r"C:\Users\Lichtman\miniconda3\envs\deepfocus\python.exe",
@@ -2142,6 +2159,164 @@ def select_all_support_points_for_plane_update(
         raise RuntimeError("Need at least 3 support points to fit a new plane.")
     return list(sps)
 
+# -----------------------------------------------------------------------------
+# MANUAL_POINTS plane update (issue #8): operator-placed points + hand-set focus
+# -----------------------------------------------------------------------------
+def load_manual_focus_points(path: Optional[str], region_name: str) -> List[Dict[str, Any]]:
+    """Load operator-placed focus points for ``region_name`` from a manual-focus
+    JSON file. Schema:
+
+        {"regions": {"<region_name>": {"points": [
+            {"x": <um>, "y": <um>, "z": <um?>,
+             "ol_uA": <float?>, "stig_x": <float?>, "stig_y": <float?>}, ...]}}}
+
+    A point WITH ``ol_uA`` is a manual point (value used per manual_focus_mode);
+    a point WITHOUT ``ol_uA`` is placement-only (AF/AS measures it there).
+    Coordinates are stage um (same frame as AP_STAGE_GOTO_X/Y). Raises with a
+    clear message on a missing file / region / empty points."""
+    if not path:
+        raise RuntimeError(
+            "plane_update_method=MANUAL_POINTS but manual_focus_points_file is not set.")
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"manual_focus_points_file not found: {path}")
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    regions = data.get("regions", {})
+    if not isinstance(regions, dict):
+        raise RuntimeError(f"{path}: 'regions' must be an object mapping region name -> points.")
+    entry = regions.get(region_name)
+    if entry is None:
+        raise RuntimeError(
+            f"{path}: no manual points for region '{region_name}' "
+            f"(available: {sorted(regions.keys())}).")
+    pts = entry.get("points", entry) if isinstance(entry, dict) else entry
+    if not pts:
+        raise RuntimeError(f"{path}: region '{region_name}' has an empty points list.")
+    out: List[Dict[str, Any]] = []
+    for i, p in enumerate(pts):
+        if "x" not in p or "y" not in p:
+            raise RuntimeError(f"{path}: region '{region_name}' point {i} is missing x/y.")
+        out.append({
+            "x": float(p["x"]),
+            "y": float(p["y"]),
+            "z": (float(p["z"]) if p.get("z") is not None else None),
+            "ol_uA": (float(p["ol_uA"]) if p.get("ol_uA") is not None else None),
+            "stig_x": (float(p["stig_x"]) if p.get("stig_x") is not None else None),
+            "stig_y": (float(p["stig_y"]) if p.get("stig_y") is not None else None),
+        })
+    return out
+
+
+def build_manual_support_points(points: List[Dict[str, Any]]) -> List[SupportPoint]:
+    """Turn manual-focus points into SupportPoint objects (index = order). The
+    ol/projective fields carry no meaning here (measurement drives OL); 0.0."""
+    return [
+        SupportPoint(
+            index=i,
+            x=p["x"], y=p["y"],
+            z=(p["z"] if p["z"] is not None else 0.0),
+            ol=(p["ol_uA"] if p["ol_uA"] is not None else 0.0),
+            projective_x=0.0, projective_y=0.0,
+        )
+        for i, p in enumerate(points)
+    ]
+
+
+def _fit_focus_plane_or_flat(rows: List[Tuple[float, float, float]], label: str) -> Tuple[float, float, float]:
+    """Fit z = a*x + b*y + c from (x,y,z) rows. With <3 points or a degenerate
+    (collinear) fit, fall back to a FLAT plane a=b=0, c=mean(z) — so a single
+    manual point can set a constant OL/stig for the whole region."""
+    zs = [r[2] for r in rows]
+    if len(rows) >= 3:
+        try:
+            a, b, c = _fit_plane_from_xyz(rows)
+            print(f"[ManualPlane/{label}] fitted a={a:.6e} b={b:.6e} c={c:.4f} from {len(rows)} pts")
+            return a, b, c
+        except RuntimeError as e:
+            print(f"[ManualPlane/{label}] {e} -> flat fallback")
+    c = mean(zs) if zs else 0.0
+    print(f"[ManualPlane/{label}] flat plane c={c:.4f} from {len(rows)} pt(s)")
+    return 0.0, 0.0, c
+
+
+def measure_one_manual_point(conn: MSEMConnection, sp: SupportPoint, manual: Dict[str, Any]) -> FocusMeasurement:
+    """Apply/measure focus + stig at one operator-placed point.
+
+    SKIP_AF (+ operator ol_uA): move stage, set AP_OLENS_CURRENT (+AP_STIG_X/Y if
+        given) to the operator's values verbatim; NO CMD_AUTOFOCUS/CMD_AUTOSTIG.
+    SEED_AF (or a point with no operator ol_uA): move stage, seed OL with the
+        operator's value if present, then run the normal AF (fine range =
+        manual_focus_seed_range_uA) + minimize-OL + AS to refine."""
+    mode = str(CONFIG.get("manual_focus_mode", "SKIP_AF")).upper()
+    has_ol = manual.get("ol_uA") is not None
+    z_target = sp.z if CONFIG["move_z_to_json_supportpoint"] else None
+    stage_move_xy_z(conn, sp.x, sp.y, z_target)
+
+    if mode == "SKIP_AF" and has_ol:
+        ol = float(manual["ol_uA"])
+        safe_set_double(conn, "AP_OLENS_CURRENT", ol)
+        sx, sy = manual.get("stig_x"), manual.get("stig_y")
+        if sx is not None:
+            safe_set_double(conn, "AP_STIG_X", float(sx))
+        if sy is not None:
+            safe_set_double(conn, "AP_STIG_Y", float(sy))
+        stig_x_final = safe_get_double(conn, "AP_STIG_X", default=float("nan"))
+        stig_y_final = safe_get_double(conn, "AP_STIG_Y", default=float("nan"))
+        print(f"[Manual/SKIP_AF] sp[{sp.index}] xy=({sp.x:.1f},{sp.y:.1f}) "
+              f"OL={ol:.1f} uA stig=({stig_x_final:.4f},{stig_y_final:.4f}) (no AF/AS)")
+        return FocusMeasurement(
+            sp_index=sp.index, x=sp.x, y=sp.y,
+            z_stage=safe_get_double(conn, "AP_STAGE_AT_Z"),
+            ol_uA=ol, dz_um=0.0,
+            af_conf_fine=1.0, af_conf_coarse=float("nan"),
+            af_success=True, minimize_ol_success=True, dz_after_minimize=0.0,
+            as_conf_x=(1.0 if sx is not None else float("nan")),
+            as_conf_y=(1.0 if sy is not None else float("nan")),
+            as_success=(sx is not None and sy is not None),
+            stig_x=stig_x_final, stig_y=stig_y_final,
+        )
+
+    # SEED_AF, or a placement-only point: seed OL (if given) then normal AF/AS.
+    if has_ol:
+        safe_set_double(conn, "AP_OLENS_CURRENT", float(manual["ol_uA"]))
+        print(f"[Manual/SEED_AF] sp[{sp.index}] seeded OL={float(manual['ol_uA']):.1f} uA, refining with AF/AS")
+    else:
+        print(f"[Manual/measure] sp[{sp.index}] placement-only point, measuring with AF/AS")
+
+    saved_range = CONFIG.get("af_fine_range_uA")
+    seed_range = CONFIG.get("manual_focus_seed_range_uA")
+    try:
+        if has_ol and seed_range:
+            CONFIG["af_fine_range_uA"] = seed_range
+        return measure_one_focus_point(conn, sp)
+    finally:
+        CONFIG["af_fine_range_uA"] = saved_range
+
+
+def measure_manual_focus_points(
+    conn: MSEMConnection,
+    sps: List[SupportPoint],
+    points: List[Dict[str, Any]],
+) -> Tuple[List[FocusMeasurement], List[Tuple[FocusMeasurement, str]]]:
+    """Apply/measure every operator-placed point. Mirrors measure_plane_update_points'
+    (ok, skipped) contract so it flows through the existing plane-fit + CSV path.
+    SKIP_AF points bypass the AF/AS validation gate (they carry no confidence);
+    SEED_AF / placement-only points must pass _validate_focus_measurement."""
+    ms: List[FocusMeasurement] = []
+    skipped: List[Tuple[FocusMeasurement, str]] = []
+    strict = bool(CONFIG.get("plane_update_strict", False))
+    mode = str(CONFIG.get("manual_focus_mode", "SKIP_AF")).upper()
+    for sp, manual in zip(sps, points):
+        m = measure_one_manual_point(conn, sp, manual)
+        is_skip = (mode == "SKIP_AF" and manual.get("ol_uA") is not None)
+        if is_skip or _validate_focus_measurement(m, require_minimize_ol=False):
+            ms.append(m)
+        else:
+            skipped.append((m, "manual point failed AF/AS validation"))
+            if strict:
+                raise RuntimeError(f"Manual point sp[{sp.index}] failed measurement (strict mode).")
+    return ms, skipped
+
 def fit_delta_plane_from_measurements(
     ms: List[FocusMeasurement],
     a_prev: float,
@@ -3353,6 +3528,40 @@ def _run_one_region_body(
         residual_pts = build_quadratic_residual_points(ms, quad_coef)
 
         print("[Quadratic+ResidualIDW] ready for tile prediction.")
+
+    elif plane_update_method == "MANUAL_POINTS":
+        manual_points = load_manual_focus_points(
+            CONFIG.get("manual_focus_points_file"), region_name)
+        sps_manual = build_manual_support_points(manual_points)
+        mode = str(CONFIG.get("manual_focus_mode", "SKIP_AF")).upper()
+        print(f"[PlaneUpdate] MANUAL_POINTS: {len(sps_manual)} operator-placed point(s), mode={mode}")
+        for sp in sps_manual:
+            print(f"  sp[{sp.index}] xy=({sp.x:.3f}, {sp.y:.3f})")
+
+        ms, skipped = measure_manual_focus_points(conn, sps_manual, manual_points)
+        focus_csv = f"{os.path.splitext(CONFIG['output_focus_points_csv'])[0]}_{region_name}.csv"
+        save_focus_points_csv(focus_csv, ms, skipped=skipped)
+        print(f"[CSV] saved manual measurements: {focus_csv} ({len(ms)} ok, {len(skipped)} skipped)")
+        if not ms:
+            raise RuntimeError(
+                f"MANUAL_POINTS: no usable measurements for region '{region_name}' "
+                f"({len(skipped)} skipped).")
+
+        a_new, b_new, c_new = _fit_focus_plane_or_flat(
+            [(m.x, m.y, m.ol_uA) for m in ms], "OL")
+        # Stig planes: update ONLY from points where stig was actually determined
+        # (operator hand-set under SKIP_AF, or AS succeeded under SEED_AF); those
+        # carry as_success=True. If no point set stig, keep the prev-focusmap stig
+        # planes (assigned above) so a focus-only manual run doesn't flatten tilt.
+        stig_rows_x = [(m.x, m.y, m.stig_x) for m in ms if m.as_success and m.stig_x == m.stig_x]
+        stig_rows_y = [(m.x, m.y, m.stig_y) for m in ms if m.as_success and m.stig_y == m.stig_y]
+        if stig_rows_x and stig_rows_y:
+            a_sx_new, b_sx_new, c_sx_new = _fit_focus_plane_or_flat(stig_rows_x, "StigX")
+            a_sy_new, b_sy_new, c_sy_new = _fit_focus_plane_or_flat(stig_rows_y, "StigY")
+
+        print(f"[NewPlane] OL    = {a_new:.6e}*x + {b_new:.6e}*y + {c_new:.3f}")
+        print(f"[NewPlane] StigX = {a_sx_new:.6e}*x + {b_sx_new:.6e}*y + {c_sx_new:.6f}")
+        print(f"[NewPlane] StigY = {a_sy_new:.6e}*x + {b_sy_new:.6e}*y + {c_sy_new:.6f}")
 
     else:
         raise RuntimeError(f"Unknown plane_update_method: {plane_update_method}")
