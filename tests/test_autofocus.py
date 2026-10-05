@@ -48,7 +48,7 @@ def main():
     print(f"  Range: {params.range} µA")
     print(f"  Mode: {params.mode}")
     print(f"  Scanrate: {params.scanrate}")
-    print(f"  Support points: {params.support_points}")
+    print(f"  Sampling points: {params.sampling_points}")
     
     # 5. Set recommended defaults
     print("\n--- Setting Recommended Defaults ---")
@@ -57,7 +57,7 @@ def main():
     print(f"  Pixelsize: {params.pixelsize} nm")
     print(f"  Range: {params.range} µA")
     print(f"  Scanrate: {params.scanrate}")
-    print(f"  Support points: {params.support_points}")
+    print(f"  Sampling points: {params.sampling_points}")
     
     # 6. Run autofocus
     print("\n--- Running Autofocus ---")

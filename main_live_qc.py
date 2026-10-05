@@ -31,12 +31,38 @@ LIVE_QC_CONFIG: Dict[str, Any] = {
 
     # Beam selection.
     # Recommended default: choose beam 1 + 4 random beams ONCE per run, then use the same 5 beams for all MFOVs.
-    "beam_selection_mode": "FIXED_PER_RUN_RANDOM",  # FIXED_PER_RUN_RANDOM / FIXED_SET / PER_MFOV_RANDOM
+    # ALL checks every beam found on disk for the tile (up to all 91) instead
+    # of a subset - catches a single beam going bad that a sample could miss
+    # entirely, at the cost of ~91 image reads+analyses per tile instead of ~5.
+    "beam_selection_mode": "FIXED_PER_RUN_RANDOM",  # FIXED_PER_RUN_RANDOM / FIXED_SET / PER_MFOV_RANDOM / ALL
     "include_beam1": True,
     "num_extra_beams": 4,
     "beam_universe": list(range(1, 92)),
     "random_seed": 20260316,
     "fixed_beams": [1, 10, 28, 55, 82],  # only used if beam_selection_mode == FIXED_SET
+
+    # Once a region finishes, the "Image quality per beam" plot in the final
+    # report is recomputed from ALL beam images already saved on disk (not
+    # just whatever beam_selection_mode sampled live) - see
+    # compute_full_beam_quality_for_region in live_qc_support.py. Live
+    # scoring during acquisition is unaffected; this only runs once, after
+    # the last tile, to fill in the final report/dashboard.
+    "full_beam_quality_report_enabled": True,
+    "full_beam_quality_workers": 16,  # thread pool size for the full-beam re-score
+    # "first_mid_last_tissue" (default): only re-score 3 tiles - first/middle/
+    #   last of the tissue-containing tiles (see
+    #   select_representative_tiles_for_full_beam_qc) - enough to catch a
+    #   persistent bad beam at a fraction of the cost of every tile.
+    # "all": every tile in the region (the original, slower behavior).
+    "full_beam_quality_tile_mode": "first_mid_last_tissue",
+
+    # Per-beam outlier detection (within one mfov's own sampled beams) - "one
+    # beam went berserk while the rest of the mfov is fine". Needs
+    # beam_selection_mode=ALL (or enough sampled beams) to reliably tell a
+    # real outlier from normal beam-to-beam variation - see beam_outlier_min_beams.
+    "beam_outlier_alert_enabled": True,
+    "beam_outlier_mad_sigma": 3.0,     # robust-outlier threshold: sigma * 1.4826 * MAD
+    "beam_outlier_min_beams": 5,       # need at least this many valid beams to judge an outlier
 
     # File discovery.
     "image_suffix_globs": ["*.bmp", "*.BMP"],
@@ -53,12 +79,17 @@ LIVE_QC_CONFIG: Dict[str, Any] = {
     "top_fraction": 0.50,
     "aggregate_mode": "median",  # median / mean / min / trimmed_mean
     "low_quality_threshold": 10.0,
+    "high_quality_threshold": 30.0,   # only used when focus_color_mode == "tiered"
 
     # Viewer.
     "display_min": -100.0,
     "display_max": 100.0,
     "hex_radius_um": 0.0,  # 0 => auto estimate from tile centers
     "colormap": "RdYlGn",
+    # "continuous" (default) = smooth colormap between display_min/display_max.
+    # "tiered" = discrete red / amber / green using low_quality_threshold and
+    # high_quality_threshold as the two cut points.
+    "focus_color_mode": "continuous",
     "save_every": 5,
 
     # Dashboard thresholds.
@@ -76,11 +107,9 @@ LIVE_QC_CONFIG: Dict[str, Any] = {
     # Downsampled overview images (qc_overview.py).
     "overview_enabled": True,            # per-MFOV overview PNG in each tile folder
     "overview_region_enabled": True,     # per-region stitched overview PNG in LiveQC dir
-    "overview_ds": 16,                   # per-MFOV downsample factor (beam px / ds)
+    "overview_ds": 16,                   # downsample factor for BOTH the per-MFOV overview and the per-region overview's individual beam tiles (beam px / ds)
     "overview_padding": 80,              # full-res stitch padding (when coords present)
     "overview_beam_layout": "auto",      # auto | coords_file (use image_coordinates.txt) — else grid montage
-    "overview_region_thumb_px": 64,      # max dim of each cached MFOV thumbnail
-    "overview_region_canvas_px": 2000,   # target size of the region overview canvas
     "overview_mfov_name": "overview_mfov.png",
     "overview_region_name": "live_qc_region_overview.png",
 }
@@ -168,21 +197,33 @@ def start_live_qc_runtime(layout: List[Dict[str, Any]], results_dir: Path, cfg: 
     return task_queue, viewer_queue, worker_p, viewer_p, run_selected_beams
 
 
-def stop_live_qc_runtime(task_queue: Any, worker_p: Any, viewer_p: Any) -> None:
+def stop_live_qc_runtime(task_queue: Any, worker_p: Any, viewer_p: Any) -> Dict[str, float]:
+    """Returns how long THIS call had to wait for the worker/viewer
+    subprocesses to drain their queues and exit, once physical imaging
+    (wall_s) is already done - the worker is still scoring every beam
+    image's quality, and the viewer is still stitching the region overview
+    and rendering the dashboard. That wait is real region time (the region
+    isn't "done" until both exit) but was previously invisible: not part of
+    wall_s (already frozen before this call), not part of focus_s (a wholly
+    separate phase) - see aggregate_batch_timing's "qc catch-up" column."""
     try:
         task_queue.put(None)
     except Exception:
         pass
 
+    _t0 = time.perf_counter()
     try:
         worker_p.join(timeout=300)
     except Exception:
         pass
+    worker_join_s = time.perf_counter() - _t0
 
+    _t1 = time.perf_counter()
     try:
         viewer_p.join(timeout=300)
     except Exception:
         pass
+    viewer_join_s = time.perf_counter() - _t1
 
     if worker_p.is_alive():
         print("[LiveQC] WARNING: worker still alive, terminating.")
@@ -191,6 +232,8 @@ def stop_live_qc_runtime(task_queue: Any, worker_p: Any, viewer_p: Any) -> None:
         print("[LiveQC] WARNING: viewer still alive, terminating.")
         viewer_p.terminate()
 
+    return {"worker_join_s": worker_join_s, "viewer_join_s": viewer_join_s}
+
 
 def make_live_qc_acquire_tiles(acq, live_qc_cfg: Dict[str, Any]):
     def acquire_tiles(
@@ -198,7 +241,13 @@ def make_live_qc_acquire_tiles(acq, live_qc_cfg: Dict[str, Any]):
         tiles: List[Tuple[float, float]],
         plans: List[Any],
         block_folder: Optional[str] = None,
+        focus_elapsed_s: float = 0.0,
+        focus_af_s: float = 0.0,
+        focus_as_s: float = 0.0,
+        focus_move_s: float = 0.0,
     ):
+        acq_tiles_t0 = time.perf_counter()
+        final_timing: Optional[Dict[str, float]] = None
         route = acq.build_tile_route(tiles)
         print(
             f"[Route] tiles={len(tiles)} route_len={len(route)} mode={acq.CONFIG['route_mode']} "
@@ -208,6 +257,21 @@ def make_live_qc_acquire_tiles(acq, live_qc_cfg: Dict[str, Any]):
         tile_times: List[float] = []
         move_times: List[float] = []
         acq_times: List[float] = []
+        # Mirrors focus_map.acquire_tiles's split of acq_times into pure beam
+        # scan vs. storage/system overhead - see print_final_timing_summary
+        # in focus_map.py. This function is a monkeypatched REPLACEMENT for
+        # focus_map.acquire_tiles (see make_live_qc_acquire_tiles), so it
+        # needs its own copy of this, not just the one in focus_map.py.
+        scan_times: List[float] = []
+        storage_times: List[float] = []
+        # tile_idx values imaged despite AP_STAGE_AT_Z reading unsafe right
+        # before triggering (see the check before CMD_TRIGGER_ACQUISITION
+        # below) - real runs have shown Z intermittently reading near 0 with
+        # no Z command issued at all, which is believed to be a telemetry/
+        # readback glitch rather than a real stage excursion (per operator
+        # request 2026-09-03: image anyway and see what these frames look
+        # like, while the underlying glitch is raised with Zeiss).
+        z_glitch_tiles: List[int] = []
 
         max_tiles = int(acq.CONFIG.get("speed_test_max_tiles", 0) or 0)
         warmup_tiles = int(acq.CONFIG.get("speed_test_warmup_tiles", 0) or 0)
@@ -244,6 +308,7 @@ def make_live_qc_acquire_tiles(acq, live_qc_cfg: Dict[str, Any]):
         run_cfg["imaging_json_path"] = acq.CONFIG.get("imaging_json_path")
         run_cfg["hex_radius_um_for_retake"] = float(live_qc_cfg.get("hex_radius_um") or 0.0)
         run_cfg["section_console_log_path"] = acq.CONFIG.get("section_console_log_path")
+        run_cfg["focus_elapsed_s"] = float(focus_elapsed_s)
         task_queue, viewer_queue, worker_p, viewer_p, run_selected_beams = start_live_qc_runtime(
             layout, results_dir, run_cfg
         )
@@ -313,7 +378,8 @@ def make_live_qc_acquire_tiles(acq, live_qc_cfg: Dict[str, Any]):
             first_i0 = route[0]
             first_plan = plans[first_i0]
             t0 = time.perf_counter()
-            acq.stage_move_xy_z(conn, first_plan.x, first_plan.y, first_plan.z_pred)
+            acq.stage_move_xy_z(conn, first_plan.x, first_plan.y, first_plan.z_pred,
+                                 verify_z=(first_plan.z_pred is not None))
             t_premove = time.perf_counter() - t0
             acq.safe_set_double(conn, "AP_OLENS_CURRENT", float(first_plan.ol_pred))
             acq.safe_set_double(conn, "AP_STIG_X", float(getattr(first_plan, 'stig_x_pred', 0.0)))
@@ -362,6 +428,41 @@ def make_live_qc_acquire_tiles(acq, live_qc_cfg: Dict[str, Any]):
                         )
                         pending_tile_meta = None
 
+                # Check the stage Z this tile is actually about to be imaged
+                # at BEFORE triggering acquisition - real runs have shown
+                # AP_STAGE_AT_Z intermittently reading near 0 with NO Z
+                # command issued at all. This is believed to be a telemetry/
+                # readback glitch rather than a real stage excursion.
+                #
+                # Only performed when plan.z_pred is not None - i.e. only for
+                # a method that actually commands a per-tile Z target. Every
+                # topography-family method (SAMPLE_TOPOGRAPHY_CORRECTION,
+                # FIDUCIAL_FOCUS_POINT_XY_REGION_OFFSET) leaves z_pred=None
+                # for every tile, meaning NOTHING here ever commands a Z move
+                # between mfovs in the first place - per the operator
+                # (2026-09-04), "unless the code specifies Z to change, the Z
+                # value should be fine", so this read (which already only
+                # ever logs a warning and images anyway, never actually
+                # gating anything) is skipped entirely rather than just its
+                # retries, removing one of the two remaining per-tile
+                # AP_STAGE_AT_Z reads (see stage_move_xy_z's own for the
+                # other). Do NOT re-enable this for a z_pred=None method
+                # without discussing with the operator first.
+                if plan.z_pred is not None:
+                    z_check = acq.get_stage_z_stable(
+                        conn,
+                        retries=int(acq.CONFIG.get("stage_z_glitch_check_retries", 0)),
+                        retry_delay_s=float(acq.CONFIG.get("stage_z_glitch_check_retry_delay_s", 0.15)),
+                    )
+                    if z_check == z_check and z_check < acq._STAGE_Z_ABORT_THRESHOLD_UM:
+                        print(
+                            f"[AcqTile] WARNING tile_idx={tile_idx} xy=({x:.3f},{y:.3f}): stage "
+                            f"Z={z_check:.1f} um confirmed below the "
+                            f"{acq._STAGE_Z_ABORT_THRESHOLD_UM:.0f} um safety floor after retries "
+                            f"- imaging anyway (Z telemetry glitch, not a real stage move)."
+                        )
+                        z_glitch_tiles.append(int(tile_idx))
+
                 t_sanity = 0.0
                 do_sanity = False
                 n = int(acq.CONFIG.get("sanity_every_n_tiles", 0) or 0)
@@ -399,6 +500,16 @@ def make_live_qc_acquire_tiles(acq, live_qc_cfg: Dict[str, Any]):
                     "y_um": float(y),
                     "tile_folder": out["tile_folder"],
                     "prefix": out["prefix_value"],
+                    # The commanded values, not read back from the image or
+                    # metadata.txt after the fact - this IS the process that
+                    # just set AP_OLENS_CURRENT/AP_STIG_X/AP_STIG_Y for this
+                    # tile, so the plan's own predicted values are exactly
+                    # what was actually commanded. Passed through unchanged
+                    # (not computed by qc_worker) so the live viewer can show
+                    # real OL/StigX/StigY instead of only image-derived proxies.
+                    "ol_pred": float(plan.ol_pred),
+                    "stig_x_pred": float(getattr(plan, "stig_x_pred", 0.0) or 0.0),
+                    "stig_y_pred": float(getattr(plan, "stig_y_pred", 0.0) or 0.0),
                 }
 
                 t_trig0 = time.perf_counter()
@@ -419,7 +530,16 @@ def make_live_qc_acquire_tiles(acq, live_qc_cfg: Dict[str, Any]):
                 if order_i < len(route):
                     next_plan = plans[route[order_i]]
                     tM0 = time.perf_counter()
-                    acq.stage_move_xy_z(conn, next_plan.x, next_plan.y, next_plan.z_pred)
+                    # verify_z=False when z_pred is None (every tile under a
+                    # topography-family method, 2026-09-04): this move never
+                    # commands a Z change in that case, so there's nothing to
+                    # verify - skips the second of the two remaining
+                    # per-tile AP_STAGE_AT_Z reads entirely (see the
+                    # pre-trigger check above for the first). Real stage-Z
+                    # moves (z_pred is not None) keep the verification/
+                    # warning as before.
+                    acq.stage_move_xy_z(conn, next_plan.x, next_plan.y, next_plan.z_pred,
+                                         verify_z=(next_plan.z_pred is not None))
                     t_move_next = time.perf_counter() - tM0
                     acq.safe_set_double(conn, "AP_OLENS_CURRENT", float(next_plan.ol_pred))
                     acq.safe_set_double(conn, "AP_STIG_X", float(getattr(next_plan, 'stig_x_pred', 0.0)))
@@ -472,6 +592,8 @@ def make_live_qc_acquire_tiles(acq, live_qc_cfg: Dict[str, Any]):
                     move_times.append(move_wall)
                     acq_times.append(acq_wall)
                     tile_times.append(total_wall)
+                    scan_times.append(scan_chain)
+                    storage_times.append(t_flush_prev + t_finish_now + t_sanity + (tiny_ms / 1000.0))
 
                 print(
                     f"[TileWall] acq_wall={acq_wall:.3f}s (scan={scan_chain:.3f}s + flush_prev={t_flush_prev:.3f}s) "
@@ -503,13 +625,70 @@ def make_live_qc_acquire_tiles(acq, live_qc_cfg: Dict[str, Any]):
 
             print("\n" + "=" * 78)
             print("[Timing] SUMMARY (excluding focus)")
-            print("  move :", _summ(move_times))
-            print("  acq  :", _summ(acq_times))
-            print("  total:", _summ(tile_times))
+            print("  move   :", _summ(move_times))
+            print("  scan   :", _summ(scan_times))
+            print("  storage:", _summ(storage_times))
+            print("  acq    :", _summ(acq_times))
+            print("  total  :", _summ(tile_times))
+            if z_glitch_tiles:
+                print(f"  Z TELEMETRY GLITCH (imaged anyway): {len(z_glitch_tiles)} tile(s) - {z_glitch_tiles}")
             print("=" * 78 + "\n")
             print(f"[LiveQC] QC outputs will be written to: {results_dir}")
+
+            final_timing = {
+                "wall_s": time.perf_counter() - acq_tiles_t0,
+                "move_s": sum(move_times),
+                "scan_s": sum(scan_times),
+                "storage_s": sum(storage_times),
+                "n_tiles": len(tile_times),
+                "n_tiles_z_glitch": len(z_glitch_tiles),
+            }
+            return final_timing
         finally:
-            stop_live_qc_runtime(task_queue, worker_p, viewer_p)
+            # Sent directly on viewer_queue (not via task_queue/qc_worker_main)
+            # so it's enqueued before stop_live_qc_runtime's shutdown sentinel
+            # even reaches the worker -- the viewer sees this before the STOP
+            # that worker relays once it drains task_queue, so the persisted
+            # HTML report picks up the final imaging timing. Only sent on the
+            # clean-completion path (final_timing stays None if an exception
+            # was raised above, e.g. Ctrl+C abort or an acquisition error).
+            if final_timing is not None:
+                try:
+                    viewer_queue.put({
+                        "type": "TIMING",
+                        "focus_s": float(focus_elapsed_s),
+                        "focus_af_s": float(focus_af_s),
+                        "focus_as_s": float(focus_as_s),
+                        "focus_move_s": float(focus_move_s),
+                        **final_timing,
+                    })
+                except Exception:
+                    pass
+            # Only knowable AFTER the worker/viewer have actually drained and
+            # exited (see stop_live_qc_runtime) - too late to fold into the
+            # TIMING message above (viewer_queue's reader is mid-exit by
+            # then), so patched directly into live_qc_timing.json instead.
+            # Safe to do without a lock/race: by the time join_timing is
+            # returned, both subprocesses have exited (or been terminated),
+            # so nothing else is writing that file anymore.
+            join_timing = stop_live_qc_runtime(task_queue, worker_p, viewer_p)
+            if final_timing is not None:
+                qc_catchup_worker_s = join_timing["worker_join_s"]
+                qc_catchup_viewer_s = join_timing["viewer_join_s"]
+                final_timing["qc_catchup_worker_s"] = qc_catchup_worker_s
+                final_timing["qc_catchup_viewer_s"] = qc_catchup_viewer_s
+                final_timing["qc_catchup_s"] = qc_catchup_worker_s + qc_catchup_viewer_s
+                try:
+                    timing_json_path = results_dir / "live_qc_timing.json"
+                    existing = {}
+                    if timing_json_path.is_file():
+                        existing = json.loads(timing_json_path.read_text(encoding="utf-8"))
+                    existing["qc_catchup_worker_s"] = qc_catchup_worker_s
+                    existing["qc_catchup_viewer_s"] = qc_catchup_viewer_s
+                    existing["qc_catchup_s"] = qc_catchup_worker_s + qc_catchup_viewer_s
+                    timing_json_path.write_text(json.dumps(existing), encoding="utf-8")
+                except Exception as exc:
+                    print(f"[LiveQC] WARNING: could not patch live_qc_timing.json with QC catch-up timing: {exc}")
             if prev_sigint_handler is not None:
                 try:
                     signal.signal(signal.SIGINT, prev_sigint_handler)

@@ -9,7 +9,6 @@ from PySide6.QtCore import Qt, QThread, Signal
 
 from ..engine.workflow import WorkflowEngine
 from .widgets import LogPanel
-from .pages.control_page import ControlPage
 from .pages.acquisition_page import AcquisitionPage
 from .pages.himc_page import HiMcPage
 from .pages.sfn_page import SfnPage
@@ -51,13 +50,11 @@ class MainWindow(QMainWindow):
         # === 2. Page Stack ===
         self.pages = QStackedWidget()
         
-        self.page_control = ControlPage(engine)
         self.page_acq = AcquisitionPage(engine)
         self.page_himc = HiMcPage(engine)
         self.page_sfn = SfnPage(engine)
         self.page_sfn.set_himc_page(self.page_himc)
 
-        self.pages.addWidget(self.page_control)
         self.pages.addWidget(self.page_acq)
         self.pages.addWidget(self.page_himc)
         self.pages.addWidget(self.page_sfn)
@@ -72,7 +69,11 @@ class MainWindow(QMainWindow):
         
         # === 5. Right Dock: Images and Documents Panel ===
         self.create_images_dock()
-        
+
+        # === 6. View menu (currently just the hidden-by-default Parameters
+        # dock's show/hide toggle - see create_parameters_dock) ===
+        self.create_view_menu()
+
         # Apply Stylesheet
         self.apply_styles()
         
@@ -98,12 +99,11 @@ class MainWindow(QMainWindow):
         bar_layout.addSpacing(30)
         
         # Tab Buttons
-        self.tab_control = QPushButton("Control & Map")
         self.tab_acq = QPushButton("Acquisition")
         self.tab_himc = QPushButton("HI-MC")
-        self.tab_sfn = QPushButton("SFN")
+        self.tab_sfn = QPushButton("Shuttle && Find")
 
-        self.tabs = [self.tab_control, self.tab_acq, self.tab_himc, self.tab_sfn]
+        self.tabs = [self.tab_acq, self.tab_himc, self.tab_sfn]
 
         for i, tab in enumerate(self.tabs):
             tab.setCheckable(True)
@@ -111,15 +111,14 @@ class MainWindow(QMainWindow):
             bar_layout.addWidget(tab)
 
         # Connect after loop to avoid lambda capture issue
-        self.tab_control.clicked.connect(lambda: self.switch_page(0))
-        self.tab_acq.clicked.connect(lambda: self.switch_page(1))
-        self.tab_himc.clicked.connect(lambda: self.switch_page(2))
-        self.tab_sfn.clicked.connect(lambda: self.switch_page(3))
-            
+        self.tab_acq.clicked.connect(lambda: self.switch_page(0))
+        self.tab_himc.clicked.connect(lambda: self.switch_page(1))
+        self.tab_sfn.clicked.connect(lambda: self.switch_page(2))
+
         bar_layout.addStretch()
-        
+
         # Select first tab
-        self.tab_control.setChecked(True)
+        self.tab_acq.setChecked(True)
         
         parent_layout.addWidget(top_bar)
 
@@ -133,6 +132,7 @@ class MainWindow(QMainWindow):
         
         self.status_panel = StatusPanel()
         dock.setWidget(self.status_panel)
+        self.page_sfn.set_status_panel(self.status_panel)
         
         self.addDockWidget(Qt.LeftDockWidgetArea, dock)
         
@@ -176,6 +176,17 @@ class MainWindow(QMainWindow):
                   "'imaging_json_selected' signal — your parameters_panel.py is "
                   "STALE. Re-deploy the full msem_control/ folder so the shared "
                   "Load JSON auto-fills the acquisition pages.")
+
+        # Hidden by default: every field here (Beam/Stage/Scan/ROI/Output/
+        # Autofocus/Autostig, "Update All Parameters") only feeds the older,
+        # separate Acquisition page (page_acq.update_from_params_panel /
+        # load_regions_from_json) - it has no effect on HI-MC at all, and its
+        # "Save JSON" toolbar button isn't wired to anything (dead). Kept
+        # around (not deleted) and reachable via View > Parameters panel
+        # (see create_view_menu) for whenever/if it turns out to be useful -
+        # HI-MC's own "Imaging JSON" field can always be Browse'd directly
+        # instead of relying on this panel's "Load JSON" auto-fill.
+        self.params_dock.setVisible(False)
     
     def create_images_dock(self):
         """Create right-side floating images and documents panel"""
@@ -188,12 +199,25 @@ class MainWindow(QMainWindow):
         self.images_panel = ImagesPanel()
         self.images_dock.setWidget(self.images_panel)
         
-        # Tab with Parameters dock (stacked behind it)
+        # Tabbed with the Parameters dock (which starts hidden - see
+        # create_parameters_dock), so re-showing Parameters later via the
+        # View menu brings it back into this same tab group instead of a
+        # separate floating window.
         self.addDockWidget(Qt.RightDockWidgetArea, self.images_dock)
         self.tabifyDockWidget(self.params_dock, self.images_dock)
-        
-        # Start with Parameters visible
-        self.params_dock.raise_()
+
+        # Start with Images && Documents visible (Parameters starts hidden)
+        self.images_dock.raise_()
+
+    def create_view_menu(self):
+        """Currently just a show/hide toggle for the Parameters dock, which
+        starts hidden (see create_parameters_dock) - lets it be brought back
+        on demand without a code change, whenever/if it turns out to be
+        useful for the current HI-MC-based workflow."""
+        menu = self.menuBar().addMenu("&View")
+        action = self.params_dock.toggleViewAction()
+        action.setText("Parameters panel")
+        menu.addAction(action)
 
     def apply_styles(self):
         """Apply global stylesheet"""
@@ -273,6 +297,17 @@ class MainWindow(QMainWindow):
                 border-radius: 4px;
                 min-height: 24px;
             }
+            /* Qt's native Windows style silently drops the bare/unqualified
+               QPushButton rule's background-color for a button's normal
+               (enabled, non-hover, non-pressed) state - only pseudo-class-
+               qualified rules like :disabled were actually being painted,
+               so every enabled button (Browse..., Add screenshot(s)..., etc)
+               rendered as plain unstyled text with no visible button chrome
+               at all. Re-declaring the same background under an explicit
+               :enabled selector makes Qt actually apply it. */
+            QPushButton:enabled {
+                background-color: #0e639c;
+            }
             QPushButton:hover {
                 background-color: #1177bb;
             }
@@ -298,7 +333,15 @@ class MainWindow(QMainWindow):
             QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus {
                 border: 1px solid #007acc;
             }
-            
+            /* disabled fields otherwise looked identical to editable ones on this
+               dark theme - e.g. "Initial OL value" auto-locked by a chosen
+               strategy gave no visual hint it wasn't a free choice anymore */
+            QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled {
+                background-color: #2d2d2d;
+                color: #808080;
+                border: 1px solid #3e3e3e;
+            }
+
             QScrollArea {
                 background-color: #1e1e1e;
                 border: none;
@@ -329,11 +372,65 @@ class MainWindow(QMainWindow):
             QCheckBox:disabled {
                 color: #666666;
             }
+            /* the indicator box itself had no border/fill of its own, so it was
+               essentially invisible against the dark background - same problem
+               as the text colour above, just for the box instead of the label */
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                border: 1px solid #6e6e6e;
+                border-radius: 3px;
+                background-color: #3c3c3c;
+            }
+            QCheckBox::indicator:hover {
+                border: 1px solid #007acc;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #007acc;
+                border: 1px solid #007acc;
+            }
+            QCheckBox::indicator:disabled {
+                background-color: #2d2d2d;
+                border: 1px solid #3e3e3e;
+            }
+            /* a checkable QGroupBox's title checkbox is a SEPARATE sub-control
+               from QCheckBox::indicator above - same invisible-on-dark-background
+               problem, just missed the first time since it's a different selector */
+            QGroupBox::indicator {
+                width: 14px;
+                height: 14px;
+                border: 1px solid #6e6e6e;
+                border-radius: 3px;
+                background-color: #3c3c3c;
+            }
+            QGroupBox::indicator:hover {
+                border: 1px solid #007acc;
+            }
+            QGroupBox::indicator:checked {
+                background-color: #007acc;
+                border: 1px solid #007acc;
+            }
             QPlainTextEdit {
                 background-color: #3c3c3c;
                 color: #cccccc;
                 border: 1px solid #3e3e3e;
                 border-radius: 3px;
+            }
+            /* never styled before - item text (e.g. added screenshot filenames
+               in the fiducial-builder lists) rendered in Qt's default dark text
+               color, effectively invisible against this app's dark background */
+            QListWidget {
+                background-color: #3c3c3c;
+                color: #cccccc;
+                border: 1px solid #3e3e3e;
+                border-radius: 3px;
+            }
+            QListWidget::item:selected {
+                background-color: #007acc;
+                color: #ffffff;
+            }
+            QListWidget::item:hover:!selected {
+                background-color: #ffffff14;
             }
             /* the combo-box POPUP list (separate from the closed box) */
             QComboBox QAbstractItemView {
@@ -357,6 +454,13 @@ class MainWindow(QMainWindow):
         for i, tab in enumerate(self.tabs):
             tab.setChecked(i == index)
         self.pages.setCurrentIndex(index)
+        # Images && Documents (see create_images_dock) exists to drag
+        # reference images onto the Acquisition page's interactive tile map -
+        # it has no drop target on HI-MC at all, so per the operator
+        # (2026-09-05) hide it there; still shown on Acquisition/Shuttle &
+        # Find. index 1 = HI-MC (self.page_himc), matching the addWidget
+        # order above.
+        self.images_dock.setVisible(index != 1)
         
     # --- Signal Handlers ---
     
@@ -395,7 +499,10 @@ class MainWindow(QMainWindow):
     def _handle_position_slot(self, x: float, y: float, z: float):
         """Slot for thread-safe position update"""
         self.status_panel.set_position(x, y, z)
-        self.page_control.update_position(x, y, z)
+        # AcquisitionPage no longer needs a push here -- it polls the engine
+        # itself on its own timer (see _poll_position in acquisition_page.py),
+        # which is how it already worked even before the Control & Map page
+        # (whose position updates went through this method) was removed.
     
     def _handle_operation_slot(self, status: str, progress: int):
         """Slot for thread-safe operation status update"""

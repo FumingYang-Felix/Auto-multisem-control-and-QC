@@ -47,11 +47,17 @@ two software components must not drive the hardware at once). It resumes on the
 runner's `finished` signal.
 
 ## What was removed
-- **Single-live / full-live** (engine methods + ControlPage UI + `msem/live_scan.py`)
-  — never worked through the API; live image only renders in ZEN.
+- **Single-live / full-live** (engine methods + the old Control & Map page's UI +
+  `msem/live_scan.py`) — never worked through the API; live image only renders in ZEN.
 - `SettingsPage` (never instantiated), `core/microscope.py`, `data/processor.py`
   (dead code, never imported).
 - `TravelPattern.SPIRAL` combo option (no backend enum → crashed on select).
+- **Control & Map page** (`control_page.py`/`ControlPage`) — AcquisitionPage already
+  duplicated its stage-move + interactive-map functionality (and did so more
+  robustly: self-polling position updates vs. a broken `on_position_update`
+  callback wiring that never fired). Its two non-duplicated sections, Focus &
+  Stigmation and Wafer Calibration, plus a manual pixel-size override for
+  non-CZI images, were merged into AcquisitionPage's left panel instead.
 
 ## Config JSON shape (`msem_run_config.json`, written by the GUI)
 ```json

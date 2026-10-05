@@ -12,7 +12,9 @@ Parameters:
 - AP_AUTOFOCUS_RANGE: 10-10000 µA (search range for main lens current)
 - DP_AUTOFOCUS_MODE: 1-2 (algorithm mode)
 - DP_AUTOFOCUS_SCANRATE: 1-8 (scan rate during autofocus)
-- DP_AUTOFOCUS_SUPPORTPOINTS: 3-100 (number of support points)
+- DP_AUTOFOCUS_SUPPORTPOINTS: 3-100 (number of sampling points; called
+  "sampling_points" in this module, not "support_points", to avoid confusion
+  with FocusMap support points, which are x,y stage positions)
 
 Confidence values (AP_AUTOFOCUS_CONFIDENCE):
 - > 0: Successful, smaller is better
@@ -56,7 +58,7 @@ class AutofocusParameters:
     range: float  # µA
     mode: int
     scanrate: int
-    support_points: int
+    sampling_points: int
 
 
 class Autofocus:
@@ -92,14 +94,17 @@ class Autofocus:
     RANGE_MAX = 10000.0
     SCANRATE_MIN = 1
     SCANRATE_MAX = 8
-    SUPPORTPOINTS_MIN = 3
-    SUPPORTPOINTS_MAX = 100
-    
+    SAMPLINGPOINTS_MIN = 3
+    SAMPLINGPOINTS_MAX = 100
+
     # Recommended defaults
     DEFAULT_PIXELSIZE = 4.0    # nm
-    DEFAULT_RANGE = 150.0      # µA (conservative)
+    DEFAULT_RANGE = 150.0      # µA (conservative) - NOT ZEN's stock range default,
+                               # which is expressed in µm of defocus, not µA of lens
+                               # current; left as our own conservative value pending
+                               # a verified µm->µA conversion for this instrument.
     DEFAULT_SCANRATE = 1       # slowest/best quality
-    DEFAULT_SUPPORTPOINTS = 15 # good balance of speed/accuracy
+    DEFAULT_SAMPLINGPOINTS = 3 # matches ZEN's own stock AF default
     
     def __init__(self, connection: MSEMConnection) -> None:
         self._conn = connection
@@ -113,7 +118,7 @@ class Autofocus:
             range=self._conn.get_double("AP_AUTOFOCUS_RANGE"),
             mode=int(self._conn.get_double("DP_AUTOFOCUS_MODE")),
             scanrate=int(self._conn.get_double("DP_AUTOFOCUS_SCANRATE")),
-            support_points=int(self._conn.get_double("DP_AUTOFOCUS_SUPPORTPOINTS")),
+            sampling_points=int(self._conn.get_double("DP_AUTOFOCUS_SUPPORTPOINTS")),
         )
     
     def set_parameters(
@@ -122,20 +127,20 @@ class Autofocus:
         range: Optional[float] = None,
         mode: Optional[int] = None,
         scanrate: Optional[int] = None,
-        support_points: Optional[int] = None,
+        sampling_points: Optional[int] = None,
     ) -> None:
         """
         Set autofocus parameters.
-        
+
         SAFETY: Be careful with 'range' parameter - large values may cause
         significant lens current changes.
-        
+
         Args:
             pixelsize: Pixel size in nm (1-25)
             range: Search range in µA (10-10000). CAUTION: Large values risky!
             mode: Algorithm mode (1 or 2)
             scanrate: Scan rate (1-8, 1=slowest/best quality)
-            support_points: Number of support points (3-100)
+            sampling_points: Number of sampling points (3-100)
         """
         if pixelsize is not None:
             self._validate_range("pixelsize", pixelsize, self.PIXELSIZE_MIN, self.PIXELSIZE_MAX)
@@ -157,10 +162,10 @@ class Autofocus:
             self._validate_range("scanrate", scanrate, self.SCANRATE_MIN, self.SCANRATE_MAX)
             self._conn.set_double("DP_AUTOFOCUS_SCANRATE", float(scanrate))
         
-        if support_points is not None:
-            self._validate_range("support_points", support_points, 
-                                self.SUPPORTPOINTS_MIN, self.SUPPORTPOINTS_MAX)
-            self._conn.set_double("DP_AUTOFOCUS_SUPPORTPOINTS", float(support_points))
+        if sampling_points is not None:
+            self._validate_range("sampling_points", sampling_points,
+                                self.SAMPLINGPOINTS_MIN, self.SAMPLINGPOINTS_MAX)
+            self._conn.set_double("DP_AUTOFOCUS_SUPPORTPOINTS", float(sampling_points))
     
     def reset_parameters(self) -> int:
         """
@@ -179,13 +184,13 @@ class Autofocus:
         - pixelsize: 4 nm
         - range: 150 µA (conservative)
         - scanrate: 1 (slowest/best quality)
-        - support_points: 15
+        - sampling_points: 3 (matches ZEN's own stock AF default)
         """
         self.set_parameters(
             pixelsize=self.DEFAULT_PIXELSIZE,
             range=self.DEFAULT_RANGE,
             scanrate=self.DEFAULT_SCANRATE,
-            support_points=self.DEFAULT_SUPPORTPOINTS,
+            sampling_points=self.DEFAULT_SAMPLINGPOINTS,
         )
     
     # ========== Autofocus Operations ==========

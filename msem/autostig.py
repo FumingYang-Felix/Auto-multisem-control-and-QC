@@ -13,13 +13,15 @@ Parameters for CMD_AUTOSTIG:
 - AP_AUTOSTIG_PIXELSIZE: 1-25 nm
 - AP_AUTOSTIG_RANGE: 0-100
 - DP_AUTOSTIG_SCANRATE: 1-8
-- DP_AUTOSTIG_SUPPORTPOINTS: 5-100
+- DP_AUTOSTIG_SUPPORTPOINTS: 5-100 (number of sampling points; called
+  "sampling_points" in this module, not "support_points", to avoid confusion
+  with FocusMap support points, which are x,y stage positions)
 
 Parameters for CMD_AUTOMSTIG:
 - AP_AUTOMSTIG_PIXELSIZE: 1-25 nm
 - AP_AUTOMSTIG_RANGE: 0-100
 - DP_AUTOMSTIG_SCANRATE: 1-8
-- DP_AUTOMSTIG_SUPPORTPOINTS: 5-100
+- DP_AUTOMSTIG_SUPPORTPOINTS: 5-100 (same "sampling_points" naming as above)
 
 Confidence values:
 - > 0: Successful, smaller is better
@@ -52,7 +54,7 @@ class AutostigParameters:
     pixelsize: float  # nm
     range: float
     scanrate: int
-    support_points: int
+    sampling_points: int
 
 
 class Autostig:
@@ -78,35 +80,36 @@ class Autostig:
     RANGE_MAX = 100.0
     SCANRATE_MIN = 1
     SCANRATE_MAX = 8
-    SUPPORTPOINTS_MIN = 5
-    SUPPORTPOINTS_MAX = 100
-    
-    # Recommended defaults
+    SAMPLINGPOINTS_MIN = 5
+    SAMPLINGPOINTS_MAX = 100
+
+    # Recommended defaults - range/sampling_points match ZEN's own stock AS
+    # defaults (confirmed against ZEN directly)
     DEFAULT_PIXELSIZE = 4.0
-    DEFAULT_RANGE = 10.0
+    DEFAULT_RANGE = 2.5
     DEFAULT_SCANRATE = 1
-    DEFAULT_SUPPORTPOINTS = 15
-    
+    DEFAULT_SAMPLINGPOINTS = 7
+
     def __init__(self, connection: MSEMConnection) -> None:
         self._conn = connection
-    
+
     # ========== Parameters ==========
-    
+
     def get_parameters(self) -> AutostigParameters:
         """Get current autostig parameters"""
         return AutostigParameters(
             pixelsize=self._conn.get_double("AP_AUTOSTIG_PIXELSIZE"),
             range=self._conn.get_double("AP_AUTOSTIG_RANGE"),
             scanrate=int(self._conn.get_double("DP_AUTOSTIG_SCANRATE")),
-            support_points=int(self._conn.get_double("DP_AUTOSTIG_SUPPORTPOINTS")),
+            sampling_points=int(self._conn.get_double("DP_AUTOSTIG_SUPPORTPOINTS")),
         )
-    
+
     def set_parameters(
         self,
         pixelsize: float = None,
         range: float = None,
         scanrate: int = None,
-        support_points: int = None,
+        sampling_points: int = None,
     ) -> None:
         """Set autostig parameters"""
         if pixelsize is not None:
@@ -115,16 +118,16 @@ class Autostig:
             self._conn.set_double("AP_AUTOSTIG_RANGE", range)
         if scanrate is not None:
             self._conn.set_double("DP_AUTOSTIG_SCANRATE", float(scanrate))
-        if support_points is not None:
-            self._conn.set_double("DP_AUTOSTIG_SUPPORTPOINTS", float(support_points))
-    
+        if sampling_points is not None:
+            self._conn.set_double("DP_AUTOSTIG_SUPPORTPOINTS", float(sampling_points))
+
     def set_recommended_defaults(self) -> None:
         """Set recommended default parameters"""
         self.set_parameters(
             pixelsize=self.DEFAULT_PIXELSIZE,
             range=self.DEFAULT_RANGE,
             scanrate=self.DEFAULT_SCANRATE,
-            support_points=self.DEFAULT_SUPPORTPOINTS,
+            sampling_points=self.DEFAULT_SAMPLINGPOINTS,
         )
     
     def reset_parameters(self) -> int:
@@ -203,35 +206,35 @@ class Automstig:
     RANGE_MAX = 100.0
     SCANRATE_MIN = 1
     SCANRATE_MAX = 8
-    SUPPORTPOINTS_MIN = 5
-    SUPPORTPOINTS_MAX = 100
-    
+    SAMPLINGPOINTS_MIN = 5
+    SAMPLINGPOINTS_MAX = 100
+
     # Recommended defaults
     DEFAULT_PIXELSIZE = 5.0
     DEFAULT_RANGE = 10.0
     DEFAULT_SCANRATE = 1
-    DEFAULT_SUPPORTPOINTS = 15
-    
+    DEFAULT_SAMPLINGPOINTS = 15
+
     def __init__(self, connection: MSEMConnection) -> None:
         self._conn = connection
-    
+
     # ========== Parameters ==========
-    
+
     def get_parameters(self) -> AutostigParameters:
         """Get current automstig parameters"""
         return AutostigParameters(
             pixelsize=self._conn.get_double("AP_AUTOMSTIG_PIXELSIZE"),
             range=self._conn.get_double("AP_AUTOMSTIG_RANGE"),
             scanrate=int(self._conn.get_double("DP_AUTOMSTIG_SCANRATE")),
-            support_points=int(self._conn.get_double("DP_AUTOMSTIG_SUPPORTPOINTS")),
+            sampling_points=int(self._conn.get_double("DP_AUTOMSTIG_SUPPORTPOINTS")),
         )
-    
+
     def set_parameters(
         self,
         pixelsize: float = None,
         range: float = None,
         scanrate: int = None,
-        support_points: int = None,
+        sampling_points: int = None,
     ) -> None:
         """Set automstig parameters"""
         if pixelsize is not None:
@@ -240,16 +243,16 @@ class Automstig:
             self._conn.set_double("AP_AUTOMSTIG_RANGE", range)
         if scanrate is not None:
             self._conn.set_double("DP_AUTOMSTIG_SCANRATE", float(scanrate))
-        if support_points is not None:
-            self._conn.set_double("DP_AUTOMSTIG_SUPPORTPOINTS", float(support_points))
-    
+        if sampling_points is not None:
+            self._conn.set_double("DP_AUTOMSTIG_SUPPORTPOINTS", float(sampling_points))
+
     def set_recommended_defaults(self) -> None:
         """Set recommended default parameters"""
         self.set_parameters(
             pixelsize=self.DEFAULT_PIXELSIZE,
             range=self.DEFAULT_RANGE,
             scanrate=self.DEFAULT_SCANRATE,
-            support_points=self.DEFAULT_SUPPORTPOINTS,
+            sampling_points=self.DEFAULT_SAMPLINGPOINTS,
         )
     
     def reset_parameters(self) -> int:

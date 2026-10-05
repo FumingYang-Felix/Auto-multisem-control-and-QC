@@ -12,13 +12,18 @@ numpy>=1.24
 Pillow>=10.0
 matplotlib>=3.7
 
+# Self-contained interactive HTML plots (focus_diagnostics.py) - generated
+# automatically at the end of every run so an operator can open one file and
+# see expected-vs-measured OL/Z without running anything.
+plotly>=5.18
+
 # SFN stage-calibration (auto_stage_calib.py) — L-marker detection on stitched
 # mosaics. Only needed if you use the SFN page's "Run calibration".
 opencv-python>=4.5
 
-# --- Optional (uncomment if you load Zeiss .czi optical images in the map) ---
+# Zeiss .czi optical image loading (map view "Load Image...") and metadata reading
+czifile>=2019.7.2
 # aicspylibczi>=3.0
-# czifile>=2019.7.2
 
 # Windows-only COM interface (comtypes) lives in requirements-windows.txt,
 # installed automatically by setup_env.py when running on Windows.

@@ -291,8 +291,12 @@ class WorkflowEngine:
 
     # ========== Autofocus ==========
 
-    def run_autofocus(self):
-        """Run autofocus"""
+    def run_autofocus(self, af_range: Optional[float] = None):
+        """Run autofocus.
+
+        af_range: search range in µA (see Autofocus.set_parameters) -- applied
+        before running if given, otherwise the scope keeps whatever range is
+        currently set. Ignored in simulation mode (nothing to configure)."""
         if not self._connected:
             self._log("Not connected", "ERROR")
             return
@@ -301,13 +305,15 @@ class WorkflowEngine:
             return
 
         self._set_operation("autofocusing")
-        
+
         def do_af():
             if self.simulation_mode:
                 self._log("Simulation: Running autofocus...")
                 time.sleep(3.0)
                 self._log("Simulation: Autofocus complete")
             else:
+                if af_range is not None:
+                    self._autofocus.set_parameters(range=af_range)
                 result = self._autofocus.run()
                 if result.success:
                     self._log(f"Autofocus complete. Confidence: {result.confidence:.2f}")
