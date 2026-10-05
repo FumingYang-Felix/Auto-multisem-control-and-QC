@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
 
@@ -57,9 +57,72 @@ class MFOVQCResult:
     is_blank_outside_roi: bool = False
     is_jittery: bool = False
     status_category: str = "ok"
+    # One (or a few) beams whose quality is a statistical outlier vs. the rest
+    # of THIS mfov's own beams - see detect_outlier_beams(). Empty when there
+    # weren't enough valid beams to judge, or none stood out.
+    outlier_beams: List[Dict[str, Any]] = field(default_factory=list)
+    has_beam_outlier: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+
+def detect_outlier_beams(
+    valid_results: Sequence[ImageQCResult],
+    mad_sigma: float = 3.0,
+    min_beams: int = 5,
+) -> List[Dict[str, Any]]:
+    """Find beams whose quality is a statistical outlier among the OTHER
+    beams in this same mfov - i.e. "one beam went berserk while the rest of
+    the mfov is fine", which a plain median/mean aggregate quality score
+    would otherwise hide (a single bad beam barely moves a median over 90
+    good ones).
+
+    Same median + MAD*1.4826*sigma robust-outlier convention already used
+    for cross-tile stig/jitter outliers in live_qc_support.py, applied here
+    across beams within one tile instead of across tiles within a region.
+    Needs at least `min_beams` valid beams to judge (an outlier vs. only 2-3
+    others isn't statistically meaningful) - returns [] below that, same as
+    a subset-sampled mfov would today.
+    """
+    if len(valid_results) < min_beams:
+        return []
+
+    quals = np.asarray([r.quality for r in valid_results], dtype=np.float64)
+    med = float(np.median(quals))
+    mad = float(np.median(np.abs(quals - med)))
+    threshold = mad_sigma * 1.4826 * max(mad, 1e-9)
+
+    outliers = []
+    for r, q in zip(valid_results, quals):
+        deviation = float(q) - med
+        if abs(deviation) > threshold:
+            outliers.append({
+                "beam_index": r.beam_index,
+                "quality": float(q),
+                "group_median": med,
+                "deviation": deviation,
+            })
+    return outliers
+
+
+def quality_tier(quality: float, low_threshold: float, high_threshold: float) -> str:
+    """Three-tier bucket for a quality score: 'red' below low_threshold,
+    'green' at/above high_threshold, 'amber' in between. Used to drive the
+    green/amber/red mfov coloring (see live_qc_support.py).
+
+    Boundary convention matches two things already established elsewhere:
+    strict '<' for the low cutoff matches "low_q" in live_qc_support.py
+    (raw_q < low_quality_threshold), and both cutoffs match how
+    matplotlib.colors.BoundaryNorm bins values (left-closed/right-open, so a
+    value exactly AT low_threshold falls in the amber bin, not red) - used
+    for the same three colors in the matplotlib/SVG focus-quality panel.
+    """
+    if quality < low_threshold:
+        return "red"
+    if quality >= high_threshold:
+        return "green"
+    return "amber"
 
 
 # MATLAB logic translated as closely as practical, with one intentional fix:
@@ -334,11 +397,17 @@ def aggregate_mfov_quality(
     outside_roi_sat_threshold: float = 30.0,
     outside_roi_std_threshold: float = 3.0,
     jitter_warn_threshold: float = 0.25,
+    beam_outlier_mad_sigma: float = 3.0,
+    beam_outlier_min_beams: int = 5,
 ) -> MFOVQCResult:
     image_results = list(image_results)
     valid_results = [r for r in image_results if r.status == "ok" and not r.acquisition_fail]
     valid_q = [r.quality for r in valid_results]
     failed = sum(1 for r in image_results if r.acquisition_fail or r.status != "ok")
+
+    outlier_beams = detect_outlier_beams(
+        valid_results, mad_sigma=beam_outlier_mad_sigma, min_beams=beam_outlier_min_beams
+    )
 
     if not valid_q:
         quality = -100.0
@@ -418,6 +487,8 @@ def aggregate_mfov_quality(
         is_blank_outside_roi=bool(is_blank),
         is_jittery=bool(is_jittery),
         status_category=str(status_category),
+        outlier_beams=outlier_beams,
+        has_beam_outlier=bool(outlier_beams),
     )
 
 

@@ -51,6 +51,10 @@ class TileMapView(InteractiveMap):
         self._roi_polygons = []  # List of QGraphicsPolygonItem
         self._highlighted_roi_idx = -1  # Currently highlighted ROI index
         self._original_polygon_styles = []  # Store original styles for unhighlighting
+
+        # Reference-only section outlines (not part of the ROI/tile-counting system)
+        self._reference_polygons = []  # List of QGraphicsPolygonItem
+        self._reference_labels = []  # List of QGraphicsSimpleTextItem
         
         # Support points for autofocus (per region)
         self._support_points = {}  # {region_idx: [(x, y), ...]}
@@ -172,8 +176,7 @@ class TileMapView(InteractiveMap):
                     import traceback
                     traceback.print_exc()
                     progress.close()
-                    from PySide6.QtWidgets import QMessageBox
-                    QMessageBox.critical(self, "CZI Load Error", 
+                    QMessageBox.critical(self, "CZI Load Error",
                         f"Failed to load CZI file:\n{str(czi_error)}\n\nCheck console for details.")
                     return False
             else:
@@ -669,9 +672,11 @@ class TileMapView(InteractiveMap):
         fill = QColor(color)
         fill.setAlpha(50)
         polygon.setBrush(fill)
-        polygon.setPen(QPen(color, 20))
+        pen = QPen(color, 3)
+        pen.setCosmetic(True)  # constant on-screen width regardless of view zoom
+        polygon.setPen(pen)
         polygon.setZValue(50)
-        
+
         self.scene.addItem(polygon)
         self._roi_polygons.append(polygon)
         
@@ -706,9 +711,11 @@ class TileMapView(InteractiveMap):
         fill = QColor(color)
         fill.setAlpha(50)
         polygon.setBrush(fill)
-        polygon.setPen(QPen(color, 20))
+        pen = QPen(color, 3)
+        pen.setCosmetic(True)  # constant on-screen width regardless of view zoom
+        polygon.setPen(pen)
         polygon.setZValue(50)
-        
+
         self.scene.addItem(polygon)
         self._roi_polygons.append(polygon)
         
@@ -725,6 +732,73 @@ class TileMapView(InteractiveMap):
     def get_roi_count(self):
         """Get number of ROI polygons"""
         return len(self._roi_polygons)
+
+    def image_px_to_scene_px(self, x: float, y: float):
+        """Convert raw (top-left-origin) image-pixel coords to scene coords.
+
+        The loaded image is centered at scene origin (0, 0), so this
+        subtracts half the image width/height. Returns None if no image
+        is currently loaded.
+        """
+        if not getattr(self, '_has_image', False):
+            return None
+        return (x - self._image_width / 2, y - self._image_height / 2)
+
+    def add_reference_polygon(self, points: list, color: QColor = None, label: str = None, label_pos=None):
+        """Add a reference-only polygon outline (e.g. a section boundary).
+
+        Unlike add_roi_from_points, this is NOT tracked as an acquirable
+        ROI/region - it's purely a visual overlay, kept in its own list so
+        it's unaffected by clear_rois()/get_roi_count().
+        """
+        from PySide6.QtGui import QPen, QPolygonF
+        from PySide6.QtWidgets import QGraphicsPolygonItem, QGraphicsSimpleTextItem, QGraphicsItem
+        from PySide6.QtCore import QPointF
+
+        if color is None:
+            color = QColor(0, 220, 220)
+
+        qpoints = [QPointF(x, y) for x, y in points]
+        polygon = QGraphicsPolygonItem(QPolygonF(qpoints))
+        pen = QPen(color, 3)
+        # Cosmetic = pen width is in device (screen) pixels, not scene units -
+        # without this a several-scene-unit-wide line shrinks to a sub-pixel
+        # sliver (and disappears) once a multi-gigapixel image is zoomed out
+        # to fit the view.
+        pen.setCosmetic(True)
+        polygon.setPen(pen)
+        fill = QColor(color)
+        fill.setAlpha(40)
+        polygon.setBrush(fill)
+        polygon.setZValue(40)  # Below ROI polygons (zValue 50), above the image (-1)
+
+        self.scene.addItem(polygon)
+        self._reference_polygons.append(polygon)
+
+        if label and label_pos:
+            text_item = QGraphicsSimpleTextItem(label)
+            text_item.setBrush(color)
+            font = text_item.font()
+            font.setPointSize(20)
+            text_item.setFont(font)
+            # Keep label a constant on-screen size regardless of view zoom -
+            # same reasoning as the cosmetic pen above.
+            text_item.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
+            text_item.setZValue(60)  # Above ROI polygons (zValue 50) so labels stay visible
+            text_item.setPos(label_pos[0], label_pos[1])
+            self.scene.addItem(text_item)
+            self._reference_labels.append(text_item)
+
+        return polygon
+
+    def clear_reference_polygons(self):
+        """Remove all reference-only section outlines and their labels"""
+        for poly in self._reference_polygons:
+            self.scene.removeItem(poly)
+        self._reference_polygons.clear()
+        for label in self._reference_labels:
+            self.scene.removeItem(label)
+        self._reference_labels.clear()
     
     def zoom_by_factor(self, factor: float):
         """Zoom in or out by a given factor"""
@@ -1743,95 +1817,115 @@ class TileMapView(InteractiveMap):
             # Final fallback: czifile
             print("WARNING: For mosaic CZI files, install: pip install aicspylibczi")
             print("WARNING: Or try: pip install pylibCZIrw")
-            print("WARNING: Falling back to czifile (may not handle mosaic files correctly)")
-            
+            print("WARNING: Falling back to czifile (tile-by-tile mosaic assembly)")
+
             try:
                 import czifile
                 import numpy as np
+                import xml.etree.ElementTree as ET
                 from PySide6.QtGui import QImage, QPixmap
                 from PySide6.QtWidgets import QApplication
-                
-                print("Loading (czifile - fallback mode)...")
+
+                print("Loading (czifile - tile-by-tile)...")
                 QApplication.processEvents()
-                
-                # Try to extract pixel size from metadata
-                pixel_size_um = 1.0  # Default
+
+                # Extract pixel size, true full-resolution size, and scene
+                # center from metadata (never touches pixel data)
+                pixel_size_um = 1.0
+                scene_center_x_um = 0.0
+                scene_center_y_um = 0.0
+                size_x = None
+                size_y = None
                 try:
-                    import xml.etree.ElementTree as ET
                     with czifile.CziFile(filepath) as czi:
                         metadata_xml = czi.metadata()
-                        root = ET.fromstring(metadata_xml)
-                        
-                        for distance in root.findall(".//Distance[@Id='X']"):
-                            value_elem = distance.find('Value')
-                            if value_elem is not None:
-                                pixel_size_um = float(value_elem.text) * 1e6
-                                print(f"DEBUG: Pixel size from czifile metadata: {pixel_size_um:.6f} um/pixel")
-                                break
+                    root = ET.fromstring(metadata_xml)
+
+                    size_x_elem = root.find(".//Information/Image/SizeX")
+                    size_y_elem = root.find(".//Information/Image/SizeY")
+                    if size_x_elem is not None and size_y_elem is not None:
+                        size_x, size_y = int(size_x_elem.text), int(size_y_elem.text)
+
+                    for distance in root.findall(".//Distance[@Id='X']"):
+                        value_elem = distance.find('Value')
+                        if value_elem is not None:
+                            pixel_size_um = float(value_elem.text) * 1e6
+                            print(f"DEBUG: Pixel size from czifile metadata: {pixel_size_um:.6f} um/pixel")
+                            break
+
+                    for scene in root.findall(".//Scene"):
+                        center = scene.find("CenterPosition")
+                        if center is not None and center.text:
+                            coords = center.text.split(',')
+                            if len(coords) >= 2:
+                                scene_center_x_um = float(coords[0].strip())
+                                scene_center_y_um = float(coords[1].strip())
+                            break
                 except Exception as e:
-                    print(f"DEBUG: Could not extract pixel size from czifile: {e}")
-                
+                    print(f"DEBUG: Could not extract czifile metadata: {e}")
+
+                # Assemble the mosaic tile-by-tile from ONLY the real,
+                # full-resolution subblocks (filtered_subblock_directory
+                # excludes pyramid/preview subblocks, which is what caused
+                # the "dotting" artifact when czi.asarray() blended them in).
+                # This also avoids ever materializing extra full-size numpy
+                # copies the way czi.asarray() + percentile-over-everything did.
+                #
+                # Color (e.g. Bgr48) CZIs store 3 interleaved samples per
+                # pixel; keep all 3 instead of slicing out just the first
+                # (that earlier "first channel" slice was actually just the
+                # raw Blue plane, which is both why color went missing and
+                # why single-channel sensor noise showed up as speckling -
+                # averaging/keeping all 3 channels smooths that out).
+                is_color = False
                 with czifile.CziFile(filepath) as czi:
-                    img = czi.asarray()
-                
-                print(f"DEBUG: czifile raw shape: {img.shape}, dtype: {img.dtype}")
-                
-                # czifile returns data in TZCYX or similar order
-                # For mosaic files, we need to find the actual H and W dimensions
-                # which are typically the two largest dimensions
-                
-                # First squeeze out singleton dimensions
-                img = np.squeeze(img)
-                print(f"DEBUG: After squeeze: {img.shape}")
-                
-                # Find the two largest dimensions (these should be H and W)
-                if len(img.shape) > 2:
-                    # Get dimension sizes and indices
-                    dim_sizes = [(i, s) for i, s in enumerate(img.shape)]
-                    # Sort by size, largest first
-                    dim_sizes.sort(key=lambda x: x[1], reverse=True)
-                    
-                    # The two largest dimensions are likely H and W
-                    largest_dims = [dim_sizes[0][0], dim_sizes[1][0]]
-                    largest_dims.sort()  # Keep order (smaller index first)
-                    
-                    print(f"DEBUG: Largest dims at indices {largest_dims}: {[img.shape[d] for d in largest_dims]}")
-                    
-                    # Reduce other dimensions by taking first element
-                    # Start from highest dimension to avoid index shifting
-                    for i in range(len(img.shape) - 1, -1, -1):
-                        if i not in largest_dims:
-                            img = np.take(img, 0, axis=i)
-                            img = np.squeeze(img)
-                    
-                    print(f"DEBUG: After reducing to 2D: {img.shape}")
-                
-                # Ensure 2D
-                while len(img.shape) > 2:
-                    img = img[0]
-                
-                print(f"DEBUG: Final czifile image shape: {img.shape}")
-                
-                if len(img.shape) != 2:
-                    raise ValueError(f"Could not reduce image to 2D, got shape {img.shape}")
-                
-                orig_h, orig_w = img.shape
-                
-                if img.dtype != np.uint8:
-                    pmin, pmax = np.percentile(img, (1, 99))
-                    img = np.clip((img - pmin) / (pmax - pmin + 1e-6) * 255, 0, 255).astype(np.uint8)
-                
-                h, w = img.shape
-                img = np.ascontiguousarray(img)
-                qimg = QImage(img.data, w, h, w, QImage.Format_Grayscale8)
-                
-                print(f"CZI loaded (czifile, full): {orig_w}x{orig_h}, pixel_size={pixel_size_um:.6f} um/px")
-                
-                # czifile doesn't provide offset info, use (0, 0)
-                return QPixmap.fromImage(qimg.copy()), (orig_w, orig_h), pixel_size_um, (0.0, 0.0)
-                
+                    subblocks = list(czi.filtered_subblock_directory)
+                    if size_x is None or size_y is None:
+                        shp, ax = czi.shape, czi.axes
+                        size_y, size_x = shp[ax.index('Y')], shp[ax.index('X')]
+
+                    print(f"DEBUG: assembling {len(subblocks)} tiles into {size_x}x{size_y} canvas")
+                    canvas = None
+                    for i, entry in enumerate(subblocks):
+                        ey, ex = entry.start[3], entry.start[4]
+                        tile = np.squeeze(entry.data_segment().data())
+                        if canvas is None:
+                            is_color = (tile.ndim == 3)
+                            shape = (size_y, size_x, tile.shape[2]) if is_color else (size_y, size_x)
+                            canvas = np.zeros(shape, dtype=np.uint16)
+                        if is_color:
+                            eh, ew = tile.shape[:2]
+                            canvas[ey:ey + eh, ex:ex + ew, :] = tile
+                        else:
+                            eh, ew = tile.shape
+                            canvas[ey:ey + eh, ex:ex + ew] = tile
+                        if i % 400 == 0:
+                            print(f"DEBUG: czifile tile {i}/{len(subblocks)}")
+                            QApplication.processEvents()
+
+                # Contrast-stretch from a strided sample (fast, avoids a
+                # percentile pass over the full multi-gigapixel canvas).
+                # Use one pmin/pmax across all channels so relative color
+                # balance (white background, stained tissue, ...) is kept.
+                sample = canvas[::8, ::8]
+                pmin, pmax = np.percentile(sample, (1, 99))
+                img8 = np.clip((canvas.astype(np.float32) - pmin) / (pmax - pmin + 1e-6) * 255, 0, 255).astype(np.uint8)
+                img8 = np.ascontiguousarray(img8)
+                if is_color:
+                    # CZI Bgr order -> RGB order for QImage
+                    img8 = np.ascontiguousarray(img8[:, :, ::-1])
+                    qimg = QImage(img8.data, size_x, size_y, size_x * 3, QImage.Format_RGB888)
+                else:
+                    qimg = QImage(img8.data, size_x, size_y, size_x, QImage.Format_Grayscale8)
+
+                print(f"CZI loaded (czifile, tile-by-tile): {size_x}x{size_y}, pixel_size={pixel_size_um:.6f} um/px")
+
+                return QPixmap.fromImage(qimg.copy()), (size_x, size_y), pixel_size_um, (scene_center_x_um, scene_center_y_um)
+
             except Exception as e:
                 print(f"CZI load error (czifile): {e}")
+                import traceback
+                traceback.print_exc()
                 return None, None, 1.0, (0.0, 0.0)
                 
         except Exception as e:
@@ -1850,10 +1944,11 @@ class AcquisitionPage(BasePage):
         # === Left: Settings Panel ===
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
-        left_scroll.setFixedWidth(320)
+        left_scroll.setFixedWidth(520)
         
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(4, 4, 4, 4)
         left_layout.setAlignment(Qt.AlignTop)
         left_layout.setSpacing(8)
         
@@ -1880,11 +1975,34 @@ class AcquisitionPage(BasePage):
         image_content.addLayout(img_layout)
         image_content.addWidget(self.lbl_image_info)
         
+        # Manual pixel-size override -- only needed for plain images (PNG/JPG/
+        # TIFF/BMP) with no embedded scale metadata, which otherwise default to
+        # 1.0 um/px (see _load_image/_load_czi). CZI files auto-detect their
+        # own pixel size from file metadata and don't need this touched.
+        pixel_size_label = QLabel("Pixel Size (manual, non-CZI):")
+        pixel_size_label.setStyleSheet("color: #888; font-size: 10px;")
+        image_content.addWidget(pixel_size_label)
+
+        pixel_size_layout = QHBoxLayout()
+        self.spin_pixel_size = QDoubleSpinBox()
+        self.spin_pixel_size.setRange(0.0001, 1000)
+        self.spin_pixel_size.setDecimals(4)
+        self.spin_pixel_size.setValue(1.0)
+        self.spin_pixel_size.setSuffix(" µm/px")
+        self.spin_pixel_size.setToolTip(
+            "Manual pixel-size override for plain images with no embedded scale. "
+            "CZI files auto-detect this from their own metadata."
+        )
+        self.spin_pixel_size.valueChanged.connect(self._on_pixel_size_changed)
+        pixel_size_layout.addWidget(self.spin_pixel_size)
+        pixel_size_layout.addStretch()
+        image_content.addLayout(pixel_size_layout)
+
         # Manual offset adjustment for aligning image with ROIs
         offset_label = QLabel("Image Offset (um):")
         offset_label.setStyleSheet("color: #888; font-size: 10px; margin-top: 8px;")
         image_content.addWidget(offset_label)
-        
+
         offset_layout = QHBoxLayout()
         offset_layout.addWidget(QLabel("X:"))
         self.spin_offset_x = QDoubleSpinBox()
@@ -1892,22 +2010,40 @@ class AcquisitionPage(BasePage):
         self.spin_offset_x.setValue(0)
         self.spin_offset_x.setSingleStep(100)
         self.spin_offset_x.setSuffix(" um")
+        self.spin_offset_x.setFixedWidth(100)
         self.spin_offset_x.setToolTip("Positive = shift ROIs left (image right)")
         self.spin_offset_x.valueChanged.connect(self._on_offset_changed)
         offset_layout.addWidget(self.spin_offset_x)
-        
+
         offset_layout.addWidget(QLabel("Y:"))
         self.spin_offset_y = QDoubleSpinBox()
         self.spin_offset_y.setRange(-50000, 50000)
         self.spin_offset_y.setValue(0)
         self.spin_offset_y.setSingleStep(100)
         self.spin_offset_y.setSuffix(" um")
+        self.spin_offset_y.setFixedWidth(100)
         self.spin_offset_y.setToolTip("Positive = shift ROIs down (image up)")
         self.spin_offset_y.valueChanged.connect(self._on_offset_changed)
         offset_layout.addWidget(self.spin_offset_y)
+        offset_layout.addStretch()
         
         image_content.addLayout(offset_layout)
-        
+
+        # Section outlines (reference-only, loaded from a sections CSV)
+        sections_layout = QHBoxLayout()
+        self.btn_load_sections_csv = QPushButton("Load Sections CSV...")
+        self.btn_load_sections_csv.setToolTip("Draw reference section outlines from a sections CSV file")
+        self.btn_load_sections_csv.clicked.connect(self._on_load_sections_csv)
+
+        self.btn_clear_sections = QPushButton("Clear")
+        self.btn_clear_sections.setStyleSheet("background-color: #5a5a5a;")
+        self.btn_clear_sections.setFixedWidth(50)
+        self.btn_clear_sections.clicked.connect(lambda: self.map_view.clear_reference_polygons())
+
+        sections_layout.addWidget(self.btn_load_sections_csv)
+        sections_layout.addWidget(self.btn_clear_sections)
+        image_content.addLayout(sections_layout)
+
         image_box.set_content_layout(image_content)
         left_layout.addWidget(image_box)
         
@@ -2018,19 +2154,48 @@ class AcquisitionPage(BasePage):
         
         stage_box.set_content_layout(stage_content)
         left_layout.addWidget(stage_box)
-        
+
+        # --- Focus & Stigmation (merged in from the removed Control & Map page) ---
+        focus_box = CollapsibleBox("Focus && Stigmation")
+        focus_form = QFormLayout()
+
+        self.spin_af_range = QDoubleSpinBox()
+        # 10-2000 uA: 10 is the API's own hard minimum (Autofocus.RANGE_MIN);
+        # 2000 is where Autofocus.set_parameters starts printing its own
+        # large-lens-current-change warning, kept here as a conservative UI
+        # ceiling (the API itself allows up to 10000).
+        self.spin_af_range.setRange(10, 2000)
+        self.spin_af_range.setValue(150.0)
+        self.spin_af_range.setSuffix(" µA")
+        self.spin_af_range.setToolTip("Autofocus search range, in µA of lens current (see Autofocus.set_parameters)")
+
+        self.btn_af = QPushButton("Run Autofocus")
+        self.btn_af.clicked.connect(lambda: self.engine.run_autofocus(af_range=self.spin_af_range.value()))
+
+        self.btn_stig = QPushButton("Run Autostig")
+        self.btn_stig.clicked.connect(lambda: self.engine.run_autostig())
+
+        focus_form.addRow("AF Range:", self.spin_af_range)
+        focus_form.addRow(self.btn_af)
+        focus_form.addRow(self.btn_stig)
+        focus_box.set_content_layout(focus_form)
+        left_layout.addWidget(focus_box)
+
         # --- Tiles (Regions) ---
         tiles_box = CollapsibleBox("Tiles")
         tiles_box.toggle()  # Start expanded
         tiles_content = QVBoxLayout()
         
-        # Regions section header with lock button
-        regions_header = QHBoxLayout()
+        # Regions section header with lock button (two rows so it can't get
+        # clipped by the narrow settings panel regardless of font/DPI)
+        regions_header = QVBoxLayout()
+        regions_header_row1 = QHBoxLayout()
+        regions_header_row2 = QHBoxLayout()
         regions_label = QLabel("Regions:")
         regions_label.setStyleSheet("font-weight: bold;")
-        regions_header.addWidget(regions_label)
-        regions_header.addStretch()
-        
+        regions_header_row1.addWidget(regions_label)
+        regions_header_row1.addStretch()
+
         # Lock/Unlock button for mask editing
         self.btn_lock_masks = QPushButton("🔒 Locked")
         self.btn_lock_masks.setCheckable(True)
@@ -2053,59 +2218,83 @@ class AcquisitionPage(BasePage):
             }
         """)
         self.btn_lock_masks.clicked.connect(self._on_lock_toggle)
-        regions_header.addWidget(self.btn_lock_masks)
-        
-        # Select All / Deselect All buttons
+        regions_header_row1.addWidget(self.btn_lock_masks)
+
+        # Select All / Deselect All buttons -- sized by their own sizeHint
+        # (not a hardcoded pixel width) so they can never clip their own text
+        # on a system with a larger default font / display scaling.
         self.btn_select_all = QPushButton("All")
-        self.btn_select_all.setFixedWidth(35)
         self.btn_select_all.setToolTip("Enable all regions")
         self.btn_select_all.clicked.connect(self._on_select_all_regions)
-        
+
         self.btn_deselect_all = QPushButton("None")
-        self.btn_deselect_all.setFixedWidth(40)
         self.btn_deselect_all.setToolTip("Disable all regions")
         self.btn_deselect_all.clicked.connect(self._on_deselect_all_regions)
-        
-        regions_header.addWidget(self.btn_select_all)
-        regions_header.addWidget(self.btn_deselect_all)
-        
-        # Regions list with checkboxes
+
+        regions_header_row2.addWidget(QLabel("Select:"))
+        regions_header_row2.addWidget(self.btn_select_all)
+        regions_header_row2.addWidget(self.btn_deselect_all)
+        regions_header_row2.addStretch()
+
+        regions_header.addLayout(regions_header_row1)
+        regions_header.addLayout(regions_header_row2)
+
+        # Regions list with checkboxes. Tall enough to browse/select among a
+        # large number of sections without constant scrolling -- the list's
+        # own scrollbar only kicks in once there are genuinely more sections
+        # than fit in this height (the outer settings panel scrolls too, but
+        # a 150px peephole made checking/unchecking many regions impractical).
         self.regions_list = QListWidget()
-        self.regions_list.setMaximumHeight(150)
+        self.regions_list.setMinimumHeight(350)
+        self.regions_list.setMaximumHeight(500)
         self.regions_list.setStyleSheet("""
             QListWidget {
                 background-color: #2a2a2a;
+                color: #ffffff;
                 border: 1px solid #3e3e3e;
                 border-radius: 4px;
             }
             QListWidget::item {
+                color: #ffffff;
                 padding: 4px;
                 border-bottom: 1px solid #3e3e3e;
             }
             QListWidget::item:selected {
+                color: #ffffff;
                 background-color: #094771;
             }
         """)
         self.regions_list.itemClicked.connect(self._on_region_selected)
         self.regions_list.itemChanged.connect(self._on_region_checkbox_changed)
         
+        # Load ROI CSV sits above the list (it replaces/seeds what the list
+        # shows), separate from the draw/save actions below the list.
+        roi_csv_row = QHBoxLayout()
+        self.btn_load_roi_csv = QPushButton("Load ROI CSV")
+        self.btn_load_roi_csv.setToolTip("Load ROI regions from an aligned-polygons CSV file (roi_coordinates column)")
+        self.btn_load_roi_csv.clicked.connect(self._on_load_rois_csv)
+        roi_csv_row.addWidget(self.btn_load_roi_csv)
+
         # Draw buttons
-        draw_layout = QHBoxLayout()
+        draw_layout = QVBoxLayout()
+        draw_row1 = QHBoxLayout()
+
         self.btn_draw_polygon = QPushButton("Draw Polygon")
         self.btn_draw_polygon.setToolTip("Click to draw polygon regions on the map")
         self.btn_draw_polygon.clicked.connect(self._on_start_drawing)
-        
+
         self.btn_load_roi = QPushButton("Load")
         self.btn_load_roi.setToolTip("Load regions from CSV or JSON file")
         self.btn_load_roi.clicked.connect(self._on_load_roi)
-        
+
         self.btn_save_roi = QPushButton("💾 Save")
         self.btn_save_roi.setToolTip("Save regions and support points to JSON file")
         self.btn_save_roi.clicked.connect(self._on_save_roi)
-        
-        draw_layout.addWidget(self.btn_draw_polygon)
-        draw_layout.addWidget(self.btn_load_roi)
-        draw_layout.addWidget(self.btn_save_roi)
+
+        draw_row1.addWidget(self.btn_draw_polygon)
+        draw_row1.addWidget(self.btn_load_roi)
+        draw_row1.addWidget(self.btn_save_roi)
+        draw_layout.addLayout(draw_row1)
         
         # Apply button (only visible when drawing)
         self.btn_apply_drawing = QPushButton("✓ Apply")
@@ -2140,6 +2329,7 @@ class AcquisitionPage(BasePage):
         action_layout.addWidget(self.btn_clear_roi)
         
         tiles_content.addLayout(regions_header)
+        tiles_content.addLayout(roi_csv_row)
         tiles_content.addWidget(self.regions_list)
         tiles_content.addLayout(draw_layout)
         tiles_content.addWidget(self.btn_apply_drawing)
@@ -2154,24 +2344,27 @@ class AcquisitionPage(BasePage):
         sp_content = QVBoxLayout()
         
         # Info label
-        sp_info = QLabel("Define autofocus points within selected region")
+        sp_info = QLabel("Define autofocus points within selected (checked) section(s)")
         sp_info.setStyleSheet("color: #888; font-size: 10px;")
+        sp_info.setWordWrap(True)
         sp_content.addWidget(sp_info)
-        
+
         # Number of support points
         sp_count_layout = QHBoxLayout()
         sp_count_layout.addWidget(QLabel("Count:"))
         self.spin_support_points = QSpinBox()
         self.spin_support_points.setRange(1, 50)
         self.spin_support_points.setValue(5)
-        self.spin_support_points.setToolTip("Number of autofocus support points")
+        self.spin_support_points.setToolTip("Number of autofocus support points per section")
         sp_count_layout.addWidget(self.spin_support_points)
         sp_count_layout.addStretch()
         sp_content.addLayout(sp_count_layout)
-        
+
         # Apply button
-        self.btn_apply_support_points = QPushButton("🎯 Apply to Selected Region")
-        self.btn_apply_support_points.setToolTip("Distribute support points in selected region")
+        self.btn_apply_support_points = QPushButton("🎯 Apply to Selected")
+        self.btn_apply_support_points.setToolTip(
+            "Apply to Selected Section(s) — distribute support points in every "
+            "checked section (falls back to the highlighted region if none are checked)")
         self.btn_apply_support_points.clicked.connect(self._on_apply_support_points)
         sp_content.addWidget(self.btn_apply_support_points)
         
@@ -2226,12 +2419,15 @@ class AcquisitionPage(BasePage):
         
         self.combo_travel = QComboBox()
         self.combo_travel.addItems(["Comb", "Serpentine"])
-        
+        self.combo_travel.setMaximumWidth(130)
+
         self.combo_direction = QComboBox()
         self.combo_direction.addItems(["Horizontal Up", "Horizontal Down", "Vertical Left", "Vertical Right"])
-        
+        self.combo_direction.setMaximumWidth(130)
+
         self.combo_start = QComboBox()
         self.combo_start.addItems(["Bottom Left", "Bottom Right", "Top Left", "Top Right"])
+        self.combo_start.setMaximumWidth(130)
         
         roi_form.addRow("Travel Pattern:", self.combo_travel)
         roi_form.addRow("Direction:", self.combo_direction)
@@ -2247,6 +2443,7 @@ class AcquisitionPage(BasePage):
         # Info label about parameter source
         param_info = QLabel("✓ Primary parameters (used for acquisition)")
         param_info.setStyleSheet("color: #4ec9b0; font-size: 10px; font-style: italic;")
+        param_info.setWordWrap(True)
         scan_layout.addWidget(param_info)
         
         scan_form = QFormLayout()
@@ -2300,6 +2497,7 @@ class AcquisitionPage(BasePage):
         # Output path
         path_layout = QHBoxLayout()
         self.edit_output_path = QLineEdit("V:\\Data")
+        self.edit_output_path.setMaximumWidth(130)
         self.btn_browse = QPushButton("...")
         self.btn_browse.setFixedWidth(30)
         self.btn_browse.clicked.connect(self._browse_output)
@@ -2313,6 +2511,7 @@ class AcquisitionPage(BasePage):
         pfm_layout = QHBoxLayout()
         self.edit_prev_focusmap_dir = QLineEdit("")
         self.edit_prev_focusmap_dir.setPlaceholderText("(optional) folder of prev_focusmap *.txt")
+        self.edit_prev_focusmap_dir.setMaximumWidth(130)
         self.btn_browse_pfm = QPushButton("...")
         self.btn_browse_pfm.setFixedWidth(30)
         self.btn_browse_pfm.clicked.connect(self._browse_prev_focusmap_dir)
@@ -2321,6 +2520,7 @@ class AcquisitionPage(BasePage):
 
         # Image settings
         self.edit_prefix = QLineEdit("tile_")
+        self.edit_prefix.setMaximumWidth(130)
 
         self.combo_format = QComboBox()
         self.combo_format.addItems(["bmp", "tif", "png", "jpg"])
@@ -2344,6 +2544,7 @@ class AcquisitionPage(BasePage):
         self.chk_enable_thumbnails.stateChanged.connect(self._on_thumbnail_toggle)
         
         self.edit_thumb_prefix = QLineEdit("thumb_")
+        self.edit_thumb_prefix.setMaximumWidth(130)
         
         self.combo_thumb_format = QComboBox()
         self.combo_thumb_format.addItems(["jpg", "png", "bmp"])
@@ -2370,12 +2571,15 @@ class AcquisitionPage(BasePage):
         
         self.edit_experiment_name = QLineEdit("")
         self.edit_experiment_name.setPlaceholderText("Auto-generated if empty")
-        
+        self.edit_experiment_name.setMaximumWidth(130)
+
         self.edit_sample_name = QLineEdit("")
         self.edit_sample_name.setPlaceholderText("Sample identifier")
-        
+        self.edit_sample_name.setMaximumWidth(130)
+
         self.edit_operator_name = QLineEdit("")
         self.edit_operator_name.setPlaceholderText("Operator name")
+        self.edit_operator_name.setMaximumWidth(130)
         
         meta_form.addRow("Experiment:", self.edit_experiment_name)
         meta_form.addRow("Sample:", self.edit_sample_name)
@@ -2406,10 +2610,42 @@ class AcquisitionPage(BasePage):
         
         self.lbl_progress = QLabel("Ready")
         self.lbl_progress.setStyleSheet("color: #888;")
-        
+
+        # Standalone mode - run off the hand-placed/CSV-loaded sections +
+        # support points on this page instead of a pre-loaded Zeiss imaging
+        # JSON. Manual initial-OL entry for now (see _build_standalone_run_config);
+        # automating that seed is future work once real focusing behavior on
+        # a from-scratch wafer is better understood.
+        standalone_layout = QVBoxLayout()
+        self.chk_standalone_mode = QCheckBox("Standalone (no ZEN JSON)")
+        self.chk_standalone_mode.setToolTip(
+            "Use sections/support points above instead of a Zeiss imaging JSON. "
+            "Generates the imaging JSON + a synthetic focus seed from this page's "
+            "own regions and support points, instead of requiring a Zeiss experiment "
+            "JSON loaded via the Parameters panel.")
+        standalone_layout.addWidget(self.chk_standalone_mode)
+
+        standalone_layout.addWidget(QLabel("Initial OL guess (µA):"))
+        standalone_ol_layout = QHBoxLayout()
+        self.spin_standalone_initial_ol = QDoubleSpinBox()
+        self.spin_standalone_initial_ol.setRange(0.0, 20000.0)
+        self.spin_standalone_initial_ol.setDecimals(1)
+        self.spin_standalone_initial_ol.setValue(3000.0)
+        self.spin_standalone_initial_ol.setFixedWidth(100)
+        self.spin_standalone_initial_ol.setToolTip(
+            "Manually-entered starting focus (objective lens current) for the very "
+            "first autofocus at each region — read it off the scope after a quick "
+            "manual focus. Autofocus refines from here; astigmatism is NOT "
+            "auto-corrected in standalone mode (flat 0,0), manage it manually for now.")
+        standalone_ol_layout.addWidget(self.spin_standalone_initial_ol)
+        standalone_ol_layout.addStretch()
+        standalone_ol_layout.addStretch()
+        standalone_layout.addLayout(standalone_ol_layout)
+
         # Buttons
         btn_layout = QHBoxLayout()
-        self.btn_start = QPushButton("▶ Start Acquisition")
+        self.btn_start = QPushButton("▶ Start")
+        self.btn_start.setToolTip("Start Acquisition")
         self.btn_start.setStyleSheet("""
             QPushButton {
                 background-color: #107c10;
@@ -2432,6 +2668,7 @@ class AcquisitionPage(BasePage):
         ctrl_layout.addLayout(tile_info)
         ctrl_layout.addWidget(self.progress_bar)
         ctrl_layout.addWidget(self.lbl_progress)
+        ctrl_layout.addLayout(standalone_layout)
         ctrl_layout.addLayout(btn_layout)
         
         ctrl_box.set_content_layout(ctrl_layout)
@@ -2583,7 +2820,7 @@ class AcquisitionPage(BasePage):
         
         main_split.addWidget(left_scroll)
         main_split.addWidget(center_widget)
-        main_split.setSizes([320, 900])
+        main_split.setSizes([520, 900])
         
         self.layout.addWidget(main_split)
         
@@ -2609,6 +2846,13 @@ class AcquisitionPage(BasePage):
         # Imaging JSON path (set via ParametersPanel.imaging_json_selected) — the
         # acquisition subprocess (focus_map.py) reads regions/contours from it.
         self._imaging_json_path = None
+        # Extra focus_map CONFIG overrides for a standalone run (imaging JSON +
+        # synthetic prev_focusmap seed generated from this page's own regions/
+        # support points) — set by _build_standalone_run_config(), merged into
+        # the subprocess config by _run_acquisition_workflow(), and cleared
+        # after every _on_start_acquisition() so a stale standalone run can't
+        # silently leak into a later ZEN-JSON run.
+        self._standalone_run_overrides = None
         # Subprocess driver for the real acquisition pipeline (lazy-created).
         self._pipeline_runner = None
         self._run_total_regions = 0
@@ -2838,7 +3082,7 @@ class AcquisitionPage(BasePage):
             tiles_count = self._calculate_tiles_for_region(points)
             
             # Update info label
-            info_text = f"Region {idx + 1}: {len(points)} vertices | Center: ({center_x:.3f}, {center_y:.3f}) | Tiles: {tiles_count}"
+            info_text = f"Region {idx + 1}: Center: ({center_x:.3f}, {center_y:.3f}) | mFoVs: {tiles_count}"
             self.lbl_region_info.setText(info_text)
             
             # Update support points status
@@ -2869,132 +3113,211 @@ class AcquisitionPage(BasePage):
             self._update_roi_count()
             self.log_panel.append_log("ROI", "INFO", f"Deleted Region {idx + 1}")
     
-    def _on_load_roi(self):
-        """Load ROI from CSV or JSON file"""
-        filepath, _ = QFileDialog.getOpenFileName(
-            self,
-            "Load ROI File",
-            "",
-            "ROI Files (*.csv *.json);;CSV Files (*.csv);;JSON Files (*.json);;All Files (*)"
-        )
-        if filepath:
-            self._load_roi_file(filepath)
-    
-    def _load_roi_file(self, filepath: str):
-        """Load ROI coordinates from file"""
+    # WaferTools (E:\WaferTools\modules\common\czi_loader.py, convert_czi_to_preview)
+    # runs section/ROI detection on a preview PNG downsampled from the source
+    # CZI so its long edge is this many pixels - not on the full-res CZI.
+    # That's the pixel space '_sections.csv'/'_aligned_polygons.csv' contour
+    # coordinates are in whenever the source was a .czi.
+    _WAFERTOOLS_DETECTION_LONG_EDGE = 4096
+
+    def _infer_csv_reference_image_size(self, csv_path: str):
+        """Best-effort: find (or derive) the reference image a WaferTools CSV's
+        pixel coordinates were computed against, and return its (width, height),
+        or None if it can't be determined.
+
+        Two sources, tried in order:
+        1. A sibling image file (naming convention: '<name>_sections.csv' /
+           '<name>_aligned_polygons.csv' -> '<name>.png') - the exact preview
+           WaferTools wrote out, if it's still sitting next to the CSV.
+        2. If the currently-loaded map image came from a .czi, derive the
+           preview size WaferTools' convert_czi_to_preview() would have
+           produced from that same CZI's full pixel dimensions (it downsamples
+           so the long edge is _WAFERTOOLS_DETECTION_LONG_EDGE, same as the
+           default WaferTools calls it with).
+
+        Needed because section-detection CSVs are generated against a PNG
+        export, while the loaded map image may instead be the full-resolution
+        source CZI (a different pixel scale entirely) - see _scaled_points().
+        """
         import os
+        base = os.path.basename(csv_path)
+        root, _ = os.path.splitext(base)
+        for suffix in ('_sections', '_aligned_polygons', '_filtered_output'):
+            if root.endswith(suffix):
+                root = root[: -len(suffix)]
+                break
+        directory = os.path.dirname(csv_path)
+        for ext in ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'):
+            candidate = os.path.join(directory, root + ext)
+            if os.path.exists(candidate):
+                try:
+                    from PIL import Image
+                    with Image.open(candidate) as im:
+                        return im.size  # (width, height)
+                except Exception:
+                    return None
+
+        current_path = getattr(self, '_current_image_path', None)
+        if current_path and current_path.lower().endswith('.czi'):
+            full_w = getattr(self.map_view, '_image_width', 0)
+            full_h = getattr(self.map_view, '_image_height', 0)
+            if full_w > 0 and full_h > 0:
+                scale = min(1.0, self._WAFERTOOLS_DETECTION_LONG_EDGE / max(full_w, full_h))
+                return full_w * scale, full_h * scale
+        return None
+
+    def _csv_scale_factor(self, csv_path: str, log_source: str):
+        """Returns (scale_x, scale_y) to convert this CSV's pixel coordinates
+        into the currently-loaded image's pixel space, inferred from a
+        sibling reference image or a derived WaferTools preview size (see
+        _infer_csv_reference_image_size)."""
+        ref_size = self._infer_csv_reference_image_size(csv_path)
+        if not ref_size or ref_size[0] <= 0 or ref_size[1] <= 0:
+            self.log_panel.append_log(
+                log_source, "WARNING",
+                "Could not determine what reference image this CSV's coordinates were computed "
+                "against - assuming they already match the loaded image's pixel space 1:1. "
+                "If regions come out misplaced or oddly sized, that assumption is wrong."
+            )
+            return 1.0, 1.0
+        scale_x = self.map_view._image_width / ref_size[0]
+        scale_y = self.map_view._image_height / ref_size[1]
+        if abs(scale_x - 1.0) > 0.01 or abs(scale_y - 1.0) > 0.01:
+            self.log_panel.append_log(
+                log_source, "INFO",
+                f"CSV appears calibrated to a {ref_size[0]:.0f}x{ref_size[1]:.0f} image; "
+                f"loaded image is {self.map_view._image_width}x{self.map_view._image_height} "
+                f"- scaling coordinates by ({scale_x:.4f}, {scale_y:.4f})"
+            )
+        return scale_x, scale_y
+
+    def _on_load_sections_csv(self):
+        """Load reference-only section outlines from a sections CSV file
+
+        Expected columns: id, contour_coordinates (JSON [[x,y],...] in raw
+        image-pixel space), optionally centroid_x/centroid_y for the label.
+        """
+        if not getattr(self.map_view, '_has_image', False):
+            QMessageBox.warning(self, "No Image", "Load an image before loading section outlines.")
+            return
+
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, "Load Sections CSV", "", "CSV Files (*.csv);;All Files (*)"
+        )
+        if not filepath:
+            return
+
+        import csv
         import json
-        
-        ext = os.path.splitext(filepath)[1].lower()
-        
+
+        self.map_view.clear_reference_polygons()
+        scale_x, scale_y = self._csv_scale_factor(filepath, "Sections")
+
+        count = 0
         try:
-            if ext == '.csv':
-                self._load_roi_csv(filepath)
-            elif ext == '.json':
-                self._load_roi_json(filepath)
-            else:
-                QMessageBox.warning(self, "Error", f"Unsupported file type: {ext}")
+            with open(filepath, 'r') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    contour = row.get('contour_coordinates')
+                    if not contour:
+                        continue
+                    raw_points = json.loads(contour)
+                    if len(raw_points) < 3:
+                        continue
+                    points = [self.map_view.image_px_to_scene_px(x * scale_x, y * scale_y) for x, y in raw_points]
+
+                    section_id = row.get('id', '')
+                    label = section_id.split('_')[-1] if section_id else None
+                    label_pos = None
+                    if row.get('centroid_x') and row.get('centroid_y'):
+                        label_pos = self.map_view.image_px_to_scene_px(
+                            float(row['centroid_x']) * scale_x, float(row['centroid_y']) * scale_y
+                        )
+
+                    self.map_view.add_reference_polygon(points, label=label, label_pos=label_pos)
+                    count += 1
         except Exception as e:
-            QMessageBox.warning(self, "Error", f"Failed to load ROI: {e}")
+            QMessageBox.warning(self, "Error", f"Failed to load sections CSV: {e}")
             import traceback
             traceback.print_exc()
-    
-    def _load_roi_csv(self, filepath: str):
-        """Load ROI from CSV file (aligned_polygons.csv format)"""
+            return
+
+        self.log_panel.append_log("Sections", "SUCCESS", f"Loaded {count} section outline(s) from {filepath}")
+
+    def _on_load_rois_csv(self):
+        """Load real, acquirable ROI regions from an aligned-polygons CSV file
+
+        Expected columns: id, roi_coordinates (JSON [[x,y],...] in raw
+        image-pixel space) - falls back to contour_coordinates if
+        roi_coordinates isn't present.
+        """
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, "Load ROI CSV", "", "CSV Files (*.csv);;All Files (*)"
+        )
+        if not filepath:
+            return
+        self._load_rois_from_csv(filepath)
+
+    def _load_rois_from_csv(self, filepath: str):
+        """Shared aligned-polygons CSV loader, used by both the "Load ROI CSV"
+        button and "Load" (when the user picks a .csv there instead of a
+        saved-session .json)."""
+        if not getattr(self.map_view, '_has_image', False):
+            QMessageBox.warning(self, "No Image", "Load an image before loading ROIs.")
+            return
+
         import csv
-        
-        polygons = {}  # polygon_id -> list of (x, y)
-        
-        with open(filepath, 'r') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                # Try different column name formats
-                poly_id = row.get('polygon_id', row.get('id', row.get('roi_id', '0')))
-                
-                # Get coordinates
-                x = float(row.get('x', row.get('X', row.get('col', 0))))
-                y = float(row.get('y', row.get('Y', row.get('row', 0))))
-                
-                if poly_id not in polygons:
-                    polygons[poly_id] = []
-                polygons[poly_id].append((x, y))
-        
-        # Add each polygon as ROI
-        colors = [
-            QColor(255, 100, 0),   # Orange
-            QColor(0, 200, 100),   # Green
-            QColor(100, 150, 255), # Blue
-            QColor(255, 50, 150),  # Pink
-            QColor(200, 200, 0),   # Yellow
-        ]
-        
-        for i, (poly_id, points) in enumerate(polygons.items()):
-            if len(points) >= 3:
-                color = colors[i % len(colors)]
-                self.map_view.add_roi_from_points(points, color)
-                self._roi_list.append(points)
-                
-                # Calculate tiles and add to regions list
-                region_num = len(self._roi_list)
-                tiles_count = self._calculate_tiles_for_region(points)
-                item = QListWidgetItem(f"Region {region_num}: {len(points)}v, {tiles_count} tiles")
-                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-                item.setCheckState(Qt.Checked)  # Enabled by default
-                self.regions_list.addItem(item)
-        
-        self._update_roi_count()
-        self.log_panel.append_log("ROI", "INFO", f"Loaded {len(polygons)} regions from CSV")
-    
-    def _load_roi_json(self, filepath: str):
-        """Load ROI from JSON file"""
         import json
-        
-        with open(filepath, 'r') as f:
-            data = json.load(f)
-        
-        # Handle different JSON formats
-        rois = []
-        
-        if 'Regions' in data:
-            # ZEISS format
-            for region in data['Regions']:
-                if 'Points' in region:
-                    points = [(p['X'], p['Y']) for p in region['Points']]
-                    rois.append(points)
-        elif 'rois' in data:
-            # Simple format
-            rois = data['rois']
-        elif isinstance(data, list):
-            # List of polygons
-            rois = data
-        
+
+        # Replace existing regions (mirrors _on_clear_rois)
+        self.map_view.clear_rois()
+        self._roi_list.clear()
+        self.regions_list.clear()
+        self._support_points.clear()
+        self.map_view.clear_support_points()
+        scale_x, scale_y = self._csv_scale_factor(filepath, "ROI")
+
         colors = [
             QColor(255, 100, 0),
             QColor(0, 200, 100),
             QColor(100, 150, 255),
             QColor(255, 50, 150),
+            QColor(200, 200, 0),
         ]
-        
-        for i, points in enumerate(rois):
-            if len(points) >= 3:
-                # Convert to tuples if needed
-                if isinstance(points[0], dict):
-                    points = [(p['x'], p['y']) for p in points]
-                color = colors[i % len(colors)]
-                self.map_view.add_roi_from_points(points, color)
-                self._roi_list.append(points)
-                
-                # Calculate tiles and add to regions list
-                region_num = len(self._roi_list)
-                tiles_count = self._calculate_tiles_for_region(points)
-                item = QListWidgetItem(f"Region {region_num}: {len(points)}v, {tiles_count} tiles")
-                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-                item.setCheckState(Qt.Checked)  # Enabled by default
-                self.regions_list.addItem(item)
-        
+
+        count = 0
+        try:
+            with open(filepath, 'r') as f:
+                reader = csv.DictReader(f)
+                for i, row in enumerate(reader):
+                    roi_str = row.get('roi_coordinates') or row.get('contour_coordinates')
+                    if not roi_str:
+                        continue
+                    raw_points = json.loads(roi_str)
+                    if len(raw_points) < 3:
+                        continue
+                    points = [self.map_view.image_px_to_scene_px(x * scale_x, y * scale_y) for x, y in raw_points]
+
+                    color = colors[i % len(colors)]
+                    self.map_view.add_roi_from_points(points, color)
+                    self._roi_list.append(points)
+
+                    region_id = row.get('id', f'Region {len(self._roi_list)}')
+                    tiles_count = self._calculate_tiles_for_region(points)
+                    item = QListWidgetItem(f"{region_id}: {tiles_count} mFoVs")
+                    item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                    item.setCheckState(Qt.Checked)
+                    self.regions_list.addItem(item)
+                    count += 1
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to load ROI CSV: {e}")
+            import traceback
+            traceback.print_exc()
+            return
+
         self._update_roi_count()
-        self.log_panel.append_log("ROI", "INFO", f"Loaded {len(rois)} regions from JSON")
-    
+        self.log_panel.append_log("ROI", "SUCCESS", f"Loaded {count} ROI region(s) from {filepath}")
+
     def _on_roi_completed(self, points: list):
         """Handle completed ROI polygon from drawing"""
         self._roi_list.append(points)
@@ -3004,13 +3327,13 @@ class AcquisitionPage(BasePage):
         tiles_count = self._calculate_tiles_for_region(points)
         
         # Add to regions list with detailed info and checkbox
-        item = QListWidgetItem(f"Region {region_num}: {len(points)}v, {tiles_count} tiles")
+        item = QListWidgetItem(f"Region {region_num}: {tiles_count} mFoVs")
         item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
         item.setCheckState(Qt.Checked)  # Enabled by default
         self.regions_list.addItem(item)
-        
+
         self._update_roi_count()
-        self.log_panel.append_log("ROI", "INFO", f"Region {region_num} created with {len(points)} vertices, {tiles_count} tiles")
+        self.log_panel.append_log("ROI", "INFO", f"Region {region_num} created with {tiles_count} mFoVs")
         
         # Update drawing status - stay in drawing mode for more regions
         if self._is_drawing:
@@ -3028,44 +3351,70 @@ class AcquisitionPage(BasePage):
         self.log_panel.append_log("ROI", "INFO", "All regions cleared")
     
     def _on_apply_support_points(self):
-        """Apply support points to selected region"""
-        current = self.regions_list.currentItem()
-        if not current:
-            QMessageBox.warning(self, "No Selection", "Please select a region first")
-            return
-        
-        idx = self.regions_list.row(current)
-        if idx >= len(self._roi_list):
-            return
-        
-        # Get region polygon (in pixel coordinates)
-        points = self._roi_list[idx]
+        """Distribute focus support points into every selected (checked)
+        section. Sections come from the regions list's own checkboxes - the
+        same "selected/enabled" state used by Select All/Deselect All - so
+        checking several loaded sections and clicking this once places
+        support points in all of them, instead of one region at a time.
+
+        Falls back to whichever region is currently highlighted if none are
+        checked (e.g. a single freshly hand-drawn ROI, which isn't checked
+        via a CSV load)."""
         count = self.spin_support_points.value()
-        
-        print(f"[AcquisitionPage] Applying {count} support points to Region {idx+1}")
-        print(f"  Region bounds: {min(p[0] for p in points):.1f} to {max(p[0] for p in points):.1f} (x)")
-        print(f"                 {min(p[1] for p in points):.1f} to {max(p[1] for p in points):.1f} (y)")
-        
-        # Distribute support points within polygon (returns pixel coordinates)
-        support_pts = self._distribute_support_points_in_polygon(points, count)
-        
-        print(f"  Generated {len(support_pts)} support points")
-        if support_pts:
-            print(f"  First point: ({support_pts[0][0]:.1f}, {support_pts[0][1]:.1f})")
-        
-        # Store support points (pixel coordinates)
-        self._support_points[idx] = support_pts
-        
-        # Draw support points on map (specify pixel coordinates)
-        self.map_view.draw_support_points(idx, support_pts, coordinates='pixel')
-        
-        # Update status
-        self.lbl_support_points_status.setText(f"Region {idx+1}: {len(support_pts)} support point(s)")
-        self.log_panel.append_log("Support Points", "SUCCESS", 
-                                  f"Added {len(support_pts)} support points to Region {idx+1}")
-        
-        # Update table
-        self._update_support_points_table(idx)
+
+        selected_indices = [
+            i for i in range(self.regions_list.count())
+            if self.regions_list.item(i).checkState() == Qt.Checked
+        ]
+
+        if not selected_indices:
+            current = self.regions_list.currentItem()
+            if not current:
+                QMessageBox.warning(self, "No Selection", "Please select (check) at least one section first")
+                return
+            selected_indices = [self.regions_list.row(current)]
+
+        applied_regions = 0
+        total_points = 0
+        for idx in selected_indices:
+            if idx >= len(self._roi_list):
+                continue
+
+            # Get region polygon (in pixel coordinates)
+            points = self._roi_list[idx]
+
+            # Distribute support points within polygon (returns pixel coordinates)
+            support_pts = self._distribute_support_points_in_polygon(points, count)
+
+            # Store support points (pixel coordinates)
+            self._support_points[idx] = support_pts
+
+            # Draw support points on map (specify pixel coordinates)
+            self.map_view.draw_support_points(idx, support_pts, coordinates='pixel')
+
+            applied_regions += 1
+            total_points += len(support_pts)
+
+        if applied_regions == 0:
+            return
+
+        if applied_regions == 1:
+            idx = selected_indices[0]
+            n = len(self._support_points.get(idx, []))
+            self.lbl_support_points_status.setText(f"Region {idx+1}: {n} support point(s)")
+            self.log_panel.append_log("Support Points", "SUCCESS",
+                                      f"Added {n} support points to Region {idx+1}")
+        else:
+            self.lbl_support_points_status.setText(
+                f"{applied_regions} section(s): {total_points} support point(s) total")
+            self.log_panel.append_log("Support Points", "SUCCESS",
+                                      f"Added support points to {applied_regions} selected section(s) "
+                                      f"({total_points} total)")
+
+        # Update table for whichever region is currently highlighted, if any
+        current = self.regions_list.currentItem()
+        if current:
+            self._update_support_points_table(self.regions_list.row(current))
     
     def _on_clear_support_points(self):
         """Clear support points from selected region"""
@@ -3463,10 +3812,18 @@ class AcquisitionPage(BasePage):
         """Handle manual offset adjustment"""
         offset_x = self.spin_offset_x.value()
         offset_y = self.spin_offset_y.value()
-        self.tile_map.set_manual_offset(offset_x, offset_y)
+        self.map_view.set_manual_offset(offset_x, offset_y)
         # Trigger redraw of ROIs with new offset
         self._redraw_all_rois()
-    
+
+    def _on_pixel_size_changed(self):
+        """Handle manual pixel-size override (see spin_pixel_size tooltip) --
+        reuses set_manual_offset's recalibration since it already recombines
+        pixel size + base/manual offset into one set_calibration() call."""
+        self.map_view.pixel_size_um = self.spin_pixel_size.value()
+        self.map_view.set_manual_offset(self.spin_offset_x.value(), self.spin_offset_y.value())
+        self._redraw_all_rois()
+
     def _redraw_all_rois(self):
         """Redraw all ROIs with current offset"""
         if hasattr(self, '_loaded_regions') and self._loaded_regions:
@@ -3625,14 +3982,126 @@ class AcquisitionPage(BasePage):
         self.combo_thumb_format.setEnabled(enabled)
         self.spin_thumb_quality.setEnabled(enabled)
     
+    def _selected_or_all_region_indices(self) -> list:
+        """Checked (selected) region indices, or every region if none are
+        checked — same fallback used by _on_apply_support_points."""
+        checked = [i for i in range(self.regions_list.count())
+                   if self.regions_list.item(i).checkState() == Qt.Checked]
+        return checked if checked else list(range(len(self._roi_list)))
+
+    def _build_standalone_run_config(self, region_indices: list, block_folder: str):
+        """Generate a Zeiss-imaging-JSON-compatible config from this page's own
+        sections + support points, so the real pipeline (focus_map.py via
+        main_live_qc.py) can run without a pre-existing ZEN experiment JSON.
+
+        Why this is possible without touching focus_map.py: tracing
+        load_region_and_support_points()/_parse_support_points_from_xml() there
+        shows a SupportPoint's Z/ProjectiveX/ProjectiveY are parsed but never
+        read again anywhere in the pipeline, and OL is always re-measured live
+        by real autofocus rather than trusted from the JSON - so those fields
+        are safe placeholders (0.0) here. The one hard requirement
+        (_run_one_region_body unconditionally loads a prev_focusmap history
+        file for EVERY plane_update_method, even ones that don't need history)
+        is satisfied with a synthetic seed file built from our own support
+        points + a manually-entered initial OL guess, paired with
+        plane_update_method=CURRENT_ALL_POINTS_PLANE, which re-measures every
+        support point fresh via real autofocus and fits a brand-new focus
+        plane - it needs nothing from the seed but each point's (x, y).
+
+        Known limitation (accepted for now): CURRENT_ALL_POINTS_PLANE only
+        refits the focus plane, not astigmatism - stig stays at the seed's
+        flat (0, 0), so manage stigmation manually via the scope until this
+        is revisited.
+
+        Returns the focus_map CONFIG overrides dict for _run_acquisition_workflow
+        to merge in, or None (having already warned the user) if any selected
+        region lacks the minimum 3 support points CURRENT_ALL_POINTS_PLANE needs.
+        """
+        import os
+        import json
+        import xml.etree.ElementTree as ET
+
+        missing_sp = [
+            f"Region_{idx + 1}" for idx in region_indices
+            if len(self._support_points.get(idx, [])) < 3
+        ]
+        if missing_sp:
+            QMessageBox.warning(
+                self, "Not enough support points",
+                "Standalone mode needs at least 3 support points per region "
+                "(CURRENT_ALL_POINTS_PLANE fits a focus plane from them).\n\n"
+                "Missing/too few in: " + ", ".join(missing_sp))
+            return None
+
+        initial_ol = self.spin_standalone_initial_ol.value()
+        config_dir = os.path.join(block_folder, "standalone_config")
+        os.makedirs(config_dir, exist_ok=True)
+
+        region_xmls = []
+        prev_focusmap_by_region = {}
+        for idx in region_indices:
+            name = f"Region_{idx + 1}"
+            points_um = [self.map_view.pixel_to_um(px, py) for px, py in self._roi_list[idx]]
+            sp_um = [self.map_view.pixel_to_um(px, py) for px, py in self._support_points[idx]]
+            cx = sum(p[0] for p in points_um) / len(points_um)
+            cy = sum(p[1] for p in points_um) / len(points_um)
+
+            region_el = ET.Element("Region", Name=name)
+            ET.SubElement(region_el, "CenterPosition").text = f"{cx:.6f},{cy:.6f}"
+            contour_el = ET.SubElement(region_el, "Contour")
+            ET.SubElement(contour_el, "Points").text = " ".join(f"{x:.6f},{y:.6f}" for x, y in points_um)
+            sps_el = ET.SubElement(region_el, "SupportPoints")
+            for x, y in sp_um:
+                sp_el = ET.SubElement(sps_el, "SupportPoint")
+                ET.SubElement(sp_el, "X").text = f"{x:.6f}"
+                ET.SubElement(sp_el, "Y").text = f"{y:.6f}"
+                # Z/OL/ProjectiveX/ProjectiveY: unused placeholders - see docstring.
+                ET.SubElement(sp_el, "Z").text = "0.0"
+                ET.SubElement(sp_el, "OL").text = "0.0"
+                ET.SubElement(sp_el, "ProjectiveX").text = "0.0"
+                ET.SubElement(sp_el, "ProjectiveY").text = "0.0"
+            region_xmls.append(ET.tostring(region_el, encoding="unicode"))
+
+            seed_path = os.path.join(config_dir, f"{name}_prev_focusmap_seed.txt")
+            with open(seed_path, "w") as f:
+                for i, (x, y) in enumerate(sp_um):
+                    # slice_id, sp_id, x_um, y_um, OL_uA, unused, unused, AF_conf, StigX, StigY
+                    f.write(f"0,{i},{x:.6f},{y:.6f},{initial_ol:.3f},0,0,1.0,0.0,0.0\n")
+            prev_focusmap_by_region[name] = seed_path
+
+        json_path = os.path.join(config_dir, "imaging.json")
+        with open(json_path, "w") as f:
+            json.dump({"Regions": region_xmls}, f, indent=2)
+
+        self.log_panel.append_log(
+            "Acquisition", "INFO",
+            f"Standalone mode: generated {len(region_xmls)} region(s) -> {json_path} "
+            f"(initial OL={initial_ol:.1f} uA, flat stig - manage astigmatism manually)")
+
+        return {
+            "imaging_json_path": json_path,
+            "prev_focusmap_by_region": prev_focusmap_by_region,
+            "plane_update_method": "CURRENT_ALL_POINTS_PLANE",
+            "initial_ol_mode": "FIXED",
+            "fm_extra": {"initial_ol_uA": initial_ol},
+        }
+
     def _on_start_acquisition(self):
         """Start acquisition by launching the real pipeline as a subprocess."""
+        import os
+        self._standalone_run_overrides = None
+        standalone = self.chk_standalone_mode.isChecked()
+
         # Check prerequisites — the pipeline reads regions/contours from the
-        # imaging JSON, so that's the hard requirement (not the optical image).
-        if not self._imaging_json_path:
+        # imaging JSON, so that's the hard requirement (not the optical image),
+        # UNLESS standalone mode generates that JSON itself from this page's
+        # own regions/support points.
+        if not standalone and not self._imaging_json_path:
             QMessageBox.warning(
                 self, "No imaging JSON",
-                "Load a Zeiss experiment JSON first (Parameters panel → Load Config).\n"
+                "Load a Zeiss experiment JSON first (Parameters panel → Load Config), "
+                "or check \"Standalone\" to generate one from the sections/support "
+                "points on this page.\n"
                 "The acquisition pipeline reads its regions, contours and support "
                 "points from that file.")
             return
@@ -3640,44 +4109,54 @@ class AcquisitionPage(BasePage):
         if len(self._roi_list) == 0:
             QMessageBox.warning(self, "No regions", "No regions loaded. Load the imaging JSON's regions first.")
             return
-        
+
         # Check if connected to hardware
         if not self.engine.is_connected():
-            QMessageBox.warning(self, "Not Connected", 
+            QMessageBox.warning(self, "Not Connected",
                               "Please connect to MultiSEM hardware first (disable Simulation mode)")
             return
-        
+
+        region_indices = self._selected_or_all_region_indices() if standalone else list(range(len(self._roi_list)))
+
         # Generate output folder structure
         output_structure = self._generate_output_structure()
-        
+
+        if standalone:
+            os.makedirs(output_structure['block_folder'], exist_ok=True)
+            overrides = self._build_standalone_run_config(region_indices, output_structure['block_folder'])
+            if overrides is None:
+                return  # already warned
+            self._standalone_run_overrides = overrides
+
         # Calculate total tiles
-        total_tiles = sum(self._calculate_tiles_for_region(points) for points in self._roi_list)
-        
+        total_tiles = sum(self._calculate_tiles_for_region(self._roi_list[i]) for i in region_indices)
+
         # Check support points
-        regions_with_sp = [i for i in range(len(self._roi_list)) if i in self._support_points]
+        regions_with_sp = [i for i in region_indices if i in self._support_points]
         sp_info = f"{len(regions_with_sp)} region(s) with support points" if regions_with_sp else "No support points defined"
-        
+
         # Show confirmation dialog with structure
         msg = QMessageBox(self)
         msg.setIcon(QMessageBox.Information)
         msg.setWindowTitle("Start Acquisition")
-        msg.setText(f"Ready to acquire {len(self._roi_list)} region(s), {total_tiles} tiles")
+        mode_note = " (standalone - no ZEN JSON)" if standalone else ""
+        msg.setText(f"Ready to acquire {len(region_indices)} region(s), {total_tiles} tiles{mode_note}")
         msg.setInformativeText(
             f"<b>Output Structure:</b><br>"
             f"<pre>{output_structure['block_folder']}/\n"
-            f"  ├── Region_1/ (Tile folders: 0001, 0002, ...)\n"
-            f"  ├── Region_2/ ...\n"
-            f"  └── Region_{len(self._roi_list)}/</pre><br>"
+            f"  ├── Region_{region_indices[0] + 1}/ (Tile folders: 0001, 0002, ...)\n"
+            f"  ├── ...\n"
+            f"  └── Region_{region_indices[-1] + 1}/</pre><br>"
             f"<small>Each tile folder contains 91 images (91-beam MSEM)</small><br><br>"
             f"<b>Support Points:</b> {sp_info}<br>"
             f"<small>Pre-acquisition autofocus will verify ≥80% pass rate</small>"
         )
         msg.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
-        
+
         if msg.exec() != QMessageBox.Ok:
             self.log_panel.append_log("Acquisition", "INFO", "Acquisition cancelled by user")
             return
-        
+
         # Start acquisition
         self._is_acquiring = True
         self.btn_start.setEnabled(False)
@@ -3760,6 +4239,16 @@ class AcquisitionPage(BasePage):
         pfm_dir = self.edit_prev_focusmap_dir.text().strip()
         if pfm_dir:
             ui["prev_focusmap_dir"] = pfm_dir
+
+        # Standalone mode (see _build_standalone_run_config): overrides
+        # imaging_json_path with our own generated JSON, and supplies the
+        # synthetic prev_focusmap_by_region seed + plane_update_method/
+        # initial_ol_mode/fm_extra it needs. Drop any leftover prev_focusmap_dir
+        # field so folder-mode matching can't silently take over.
+        if self._standalone_run_overrides:
+            ui.pop("prev_focusmap_dir", None)
+            ui.update(self._standalone_run_overrides)
+
         config = build_run_config(ui)
 
         # Create + wire the runner once.
@@ -4098,20 +4587,27 @@ class AcquisitionPage(BasePage):
         self.lbl_progress.setText(f"Tile {current}/{total}")
     
     def _on_load_roi(self):
-        """Load ROI regions and support points from JSON/CSV file"""
+        """Load ROI regions and support points from a saved-session JSON file,
+        or ROI polygons from an aligned-polygons CSV file (see
+        _load_rois_from_csv for the CSV column format)."""
         from PySide6.QtWidgets import QFileDialog
         import json
-        
+        import os
+
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Load ROI Configuration",
             "",
             "JSON Files (*.json);;CSV Files (*.csv);;All Files (*)"
         )
-        
+
         if not file_path:
             return
-        
+
+        if os.path.splitext(file_path)[1].lower() == '.csv':
+            self._load_rois_from_csv(file_path)
+            return
+
         try:
             with open(file_path, 'r') as f:
                 data = json.load(f)
@@ -4280,9 +4776,10 @@ class AcquisitionPage(BasePage):
                 
                 # Add to regions list with checkbox
                 tiles_count = self._calculate_tiles_for_region(polygon_px)
-                item = QListWidgetItem(f"{name} ({tiles_count} tiles)")
+                item = QListWidgetItem(f"{name} ({tiles_count} mFoVs)")
                 item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
                 item.setCheckState(Qt.Checked)  # Enabled by default
+                item.setToolTip(item.text())
                 self.regions_list.addItem(item)
             
             # Update status

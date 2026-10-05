@@ -192,13 +192,15 @@ class BeamArcMonitor(threading.Thread):
         self.poll_interval = poll_interval
         self.from_start = from_start
         self.detector = ArcDetector(on_arc=on_arc, **detector_kwargs)
-        self._stop = threading.Event()
+        # NOT named self._stop -- threading.Thread has an internal _stop()
+        # method, and shadowing it with an Event breaks Thread.join().
+        self._stop_evt = threading.Event()
         self._path: Optional[str] = None
         self._pos = 0
         self._buf = ""
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_evt.set()
 
     def _select_active(self) -> Optional[str]:
         path = find_active_log(self.log_dir)
@@ -238,13 +240,13 @@ class BeamArcMonitor(threading.Thread):
             self._buf = self._buf[-1_000_000:]
 
     def run(self) -> None:
-        while not self._stop.is_set():
+        while not self._stop_evt.is_set():
             try:
                 self._select_active()
                 self._read_new()
             except Exception:
                 pass                                    # a transient FS error must not kill the monitor
-            self._stop.wait(self.poll_interval)
+            self._stop_evt.wait(self.poll_interval)
 
 
 def _cli() -> None:

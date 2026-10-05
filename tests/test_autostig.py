@@ -39,7 +39,7 @@ def main():
     print(f"  Pixelsize: {params.pixelsize} nm")
     print(f"  Range: {params.range}")
     print(f"  Scanrate: {params.scanrate}")
-    print(f"  Support points: {params.support_points}")
+    print(f"  Sampling points: {params.sampling_points}")
     
     # Set recommended defaults
     print("\nSetting recommended defaults...")
@@ -61,7 +61,7 @@ def main():
     print(f"  Pixelsize: {params.pixelsize} nm")
     print(f"  Range: {params.range}")
     print(f"  Scanrate: {params.scanrate}")
-    print(f"  Support points: {params.support_points}")
+    print(f"  Sampling points: {params.sampling_points}")
     
     print("\nRunning CMD_AUTOMSTIG (this takes longer)...")
     ret = mstig.run()

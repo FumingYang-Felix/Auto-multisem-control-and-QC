@@ -61,3 +61,30 @@ msem_run_config.json
 docs/*.pdf
 docs/mSEMService.log*.xml
 
+
+# ---------------------------------------------------------------------------
+# HI-MC run outputs and machine-local settings
+# ---------------------------------------------------------------------------
+# focus_map writes one tile plan per region on every run (154 of them had
+# accumulated here). They are output, not source. One is kept as an example
+# of the format - see the negation below - so the layout can be read without
+# having to do a run first.
+tile_plan_propagate_tilt_1pt_*.csv
+!tile_plan_propagate_tilt_1pt_S10R1.csv
+
+# Same for focus_map's per-region tile list (output_tiles_csv), including
+# the ones written for partial retakes. One example kept, same region as
+# the tile plan above so the two can be read side by side.
+tiles_*.csv
+!tiles_S10R1.csv
+
+# Diagnostic plots written by the fit/compare scripts.
+expected_vs_measured_ol_*.png
+
+# Who gets failure alerts is per-deployment, and the file holds real email
+# addresses. Create your own; alerts.py reads one address per line.
+himc_notify_emails.txt
+
+# Claude Code's per-machine tool permissions - absolute paths from one
+# workstation, meaningless anywhere else.
+.claude/

@@ -551,7 +551,7 @@ class ParametersPanel(QWidget):
         
         for i, region in enumerate(self._loaded_experiment.regions):
             # Create list item with region info
-            item_text = f"{region.name} - {len(region.polygon_points)} vertices, {len(region.support_points)} AF points"
+            item_text = f"{region.name} - {len(region.support_points)} AF points"
             self.regions_list.addItem(item_text)
         
         print(f"\n[ParametersPanel] Loaded {len(self._loaded_experiment.regions)} regions into list")

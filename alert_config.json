@@ -1,0 +1,25 @@
+{
+  "_readme": [
+    "Failure-alert settings for the SFN module (auto_stage_calib.py, stage_init.py), read by alerts.py.",
+    "Set enabled=true once smtp_host/from_addr/to_addrs below are filled in.",
+    "The SMTP password is NOT stored here -- set it in the environment variable named by",
+    "smtp_password_env (default MSEM_ALERT_SMTP_PASSWORD) before launching the SFN app,",
+    "e.g. via Windows System Properties > Environment Variables.",
+    "For a text-message alert, add a carrier email-to-SMS gateway address to to_addrs, e.g.:",
+    "  Verizon:   <10-digit-number>@vtext.com",
+    "  AT&T:      <10-digit-number>@txt.att.net",
+    "  T-Mobile:  <10-digit-number>@tmomail.net",
+    "  Sprint:    <10-digit-number>@messaging.sprintpcs.com",
+    "If your institution's SMTP relay allows unauthenticated internal senders, leave",
+    "smtp_username blank and the code will skip the login() step."
+  ],
+  "enabled": false,
+  "smtp_host": "smtp.your-provider.example",
+  "smtp_port": 587,
+  "use_tls": true,
+  "smtp_username": "",
+  "smtp_password_env": "MSEM_ALERT_SMTP_PASSWORD",
+  "from_addr": "",
+  "to_addrs": [],
+  "subject_prefix": "[HIMC SFN]"
+}
